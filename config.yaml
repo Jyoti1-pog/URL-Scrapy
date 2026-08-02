@@ -1,0 +1,469 @@
+# haat-lister configuration.
+#
+# Everything tunable lives here rather than in source. CLI flags override these
+# values for a single run; this file is the durable default.
+#
+# Lines marked  # OPERATOR:  need your attention before a real run.
+# `haat-lister config-check` reports every one of them that is still unset.
+
+# ---------------------------------------------------------------------------
+# FETCH -- how we talk to source sites (Rule 2.5)
+# ---------------------------------------------------------------------------
+fetch:
+  # {contact} is filled from HAAT_CONTACT in .env. We identify honestly; there
+  # is no fingerprint spoofing anywhere in this tool, by design.
+  user_agent_template: "haat-lister/0.1 (+catalogue migration for haat.ganges.world; contact: {contact})"
+
+  # Browser-shaped UA used ONLY for Tier-2a downloads of images we are entitled
+  # to fetch, where the CDN requires it. Never used to evade a block.
+  download_user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+  timeout_s: 20.0
+  connect_timeout_s: 10.0
+  max_retries: 3
+  respect_robots: true
+
+  # Per-domain politeness. `--concurrency` scales across DISTINCT domains; a
+  # single host is never hit by more than one request at a time.
+  per_domain_concurrency: 1
+  per_domain_delay_s: 2.0
+  per_domain_delay_jitter_s: 0.75
+
+  max_redirects: 5
+  max_html_bytes: 5000000
+
+  # Product URLs are fetched from inside your network, and once the web console
+  # is running they can be typed by anyone who can reach it. So loopback,
+  # private ranges, link-local and the cloud metadata endpoint are refused --
+  # on every redirect hop, not just on the URL you typed.
+  #
+  # This is the escape hatch, and it is a list of HOSTS rather than a switch, so
+  # that allowing your own staging box is easy and turning the guard off is not.
+  # Ships empty on purpose.
+  #
+  #   To run the bundled demo (demo/shop.py), add:  ["127.0.0.1"]
+  allow_private_hosts: []
+
+# ---------------------------------------------------------------------------
+# RENDER -- Stage B. A real Chromium, reached only when Stage A came back
+# incomplete. Roughly 3 seconds and a browser process per page against 200ms
+# for httpx, so on a 5,000-row batch the difference is hours. It stays a
+# fallback, never a default path.
+#
+# Requires the optional extra:  pip install "haat-lister[render]"
+#                               playwright install chromium
+# Without it, rows that would have been rendered carry a note saying so and the
+# run continues on the static result.
+# ---------------------------------------------------------------------------
+render:
+  enabled: true
+
+  # What Stage A must be missing before a browser is worth launching.
+  #
+  # Deliberately short. Price, weight and dimensions are absent from most source
+  # pages full stop -- they are absent from the rendered DOM too, and paying
+  # three seconds to confirm that on every row would be the single most
+  # expensive way to learn nothing. These three are what client-side rendering
+  # actually supplies: React storefronts that ship an empty <div id="root">,
+  # and galleries that only exist after a lazy-load script runs.
+  #
+  # Allowed: title, description, images, price, structured_data
+  retry_when_missing: [title, description, images]
+
+  timeout_ms: 20000
+
+  # networkidle waits for the XHR that fetches the product; domcontentloaded
+  # often fires before it lands. load | domcontentloaded | networkidle
+  wait_until: networkidle
+
+  # Give lazy-load and hydration a moment after the wait condition.
+  settle_ms: 500
+
+  # We need image URLs from the DOM, not image bytes -- the <img src> attribute
+  # is there whether or not the pixels arrive. Blocking these is both much
+  # faster for us and much lighter on the source site.
+  block_resource_types: [image, media, font]
+
+  viewport_width: 1280
+  viewport_height: 2000
+
+# ---------------------------------------------------------------------------
+# EXTRACTION -- heuristics for the DOM fallback path. Structured data (JSON-LD,
+# microdata, OpenGraph) is always tried first and none of this applies to it.
+# ---------------------------------------------------------------------------
+extraction:
+  # Site-specific extraction for shops the generic path gets wrong. Every .py
+  # file in this directory is imported at startup and can register a plugin --
+  # so this is your own code being executed, and it only happens when the
+  # setting is non-empty. Every file loaded is logged by full path.
+  #
+  # Start from haat_lister/extract/plugins/example_shopify.py; it is the whole
+  # interface in about ninety lines.
+  plugins_dir: ""
+
+  # Trailing site branding on <title>: "Blue Kurta | MyStore | Free Shipping".
+  # Only stripped when the tail looks like branding, never when it is the only
+  # text we have.
+  title_suffix_separators: [" | ", " — ", " – ", " - ", " :: ", " » "]
+  title_suffix_max_words: 6
+
+  # A title that is >60% shouty is SEO spam; we case-normalise it and drop
+  # confidence rather than passing it through.
+  allcaps_ratio_threshold: 0.6
+
+  # A description shorter than this is almost always a stub, not a description.
+  description_min_length: 40
+
+  # Searched in order for the DOM-heuristic fallback. First one with enough
+  # text wins.
+  description_selectors:
+    - "[itemprop='description']"
+    - "#product-description"
+    - ".product-description"
+    - ".product__description"
+    - ".product-single__description"
+    - "#tab-description"
+    - ".woocommerce-product-details__short-description"
+    - "#productDescription"
+    - ".description"
+    - "[data-product-description]"
+
+  # Whole lines matching any of these (case-insensitive substring) are dropped
+  # from a description. UI chrome, not product copy.
+  description_boilerplate:
+    - "add to cart"
+    - "add to bag"
+    - "buy now"
+    - "buy it now"
+    - "free shipping"
+    - "free delivery"
+    - "size guide"
+    - "size chart"
+    - "share this"
+    - "share on"
+    - "return policy"
+    - "returns & exchanges"
+    - "cash on delivery"
+    - "customer reviews"
+    - "write a review"
+    - "you may also like"
+    - "related products"
+    - "subscribe"
+    - "newsletter"
+    - "cookie"
+    - "javascript"
+    - "sold out"
+    - "quantity"
+    - "sku:"
+
+  # Spec-table labels, matched case-insensitively against the left-hand cell of
+  # a table row, a <dl> pair, or a "Label: value" line.
+  weight_labels: [weight, net weight, product weight, item weight, unit weight]
+  # Matched BEFORE weight_labels. Shipping weight includes packaging, so it is
+  # used only when no product weight exists, and the row is flagged.
+  shipping_weight_labels: [shipping weight, gross weight, packed weight, packaging weight]
+  dimension_labels: [dimensions, dimension, measurements, measurement, size, product size,
+                     product dimensions, item dimensions]
+  length_labels: [length, len, long]
+  width_labels: [width, breadth, wide]
+  height_labels: [height, high, depth, thickness, tall]
+
+  # Variant/size controls, searched in order.
+  size_selectors:
+    - "select[name*='size' i] option"
+    - "select[id*='size' i] option"
+    - "[data-option-name*='size' i] [data-value]"
+    - "fieldset[name*='size' i] label"
+    - ".swatch[data-option-name*='size' i] .swatch-element"
+    - "[class*='size'] [class*='swatch']"
+  # Option text that is a prompt, not a size.
+  size_noise: ["select size", "choose size", "size", "select", "choose an option",
+               "pick a size", "-", "--", "please select"]
+
+  # Vague stock copy that must NOT become a number.
+  vague_stock_phrases: ["only a few left", "low stock", "limited stock", "selling fast",
+                        "almost gone", "in stock", "available", "few left"]
+
+# ---------------------------------------------------------------------------
+# CURRENCY -- detection only. Conversion is a separate, explicit decision.
+# ---------------------------------------------------------------------------
+currency:
+  # Unambiguous symbols.
+  symbols:
+    "₹": INR
+    "€": EUR
+    "£": GBP
+    "¥": JPY
+    "₩": KRW
+  # Textual prefixes, longest match first.
+  prefixes:
+    "rs.": INR
+    "rs": INR
+    "inr": INR
+    "us$": USD
+    "usd": USD
+    "eur": EUR
+    "gbp": GBP
+    "aed": AED
+    "cad": CAD
+    "aud": AUD
+    "sgd": SGD
+  # "$" is used by USD, CAD, AUD, SGD and others. We resolve it to this only as
+  # a last resort, always at low confidence and always flagged, because the
+  # default price strategy is `blank` and a human sets the real number anyway.
+  ambiguous_dollar_default: USD
+
+# ---------------------------------------------------------------------------
+# TIER 1 VALIDATOR -- the nine predicates. See docs and images/validator.py.
+# ---------------------------------------------------------------------------
+validator:
+  # Predicate 5. A tracking pixel or placeholder is well under this.
+  min_bytes: 10240
+
+  # Predicate 6. haat is a premium marketplace; thumbnails are not listable.
+  min_width: 800
+  min_height: 800
+
+  # Predicate 3.
+  max_redirect_hops: 5
+
+  # Predicate 6 -- how much of the file we pull before asking Pillow for the
+  # dimensions. JPEG and PNG answer within a few KB, which is the point.
+  header_probe_bytes: 65536
+  # WebP and AVIF will not decode from a partial file at all, so when the probe
+  # comes back undecodable we keep reading up to this ceiling before giving up.
+  # Without it, every WebP on the web would fail Tier 1 -- and haat's own
+  # storage serves WebP.
+  max_probe_bytes: 5242880
+
+  # Predicate 7. Disabled by --no-hotlink-test, which marks affected rows for
+  # review because we can no longer promise the URL works for third parties.
+  hotlink_test: true
+  hotlink_neutral_user_agent: "Mozilla/5.0 (compatible; image-check/1.0)"
+
+  # Predicate 8. Any of these appearing in a URL means it is signed or scoped
+  # to a session: it works today and 404s tomorrow, which is worthless in a
+  # live listing.
+  signed_url_tokens:
+    - "expires"
+    - "Expires"
+    - "X-Amz-Expires"
+    - "X-Amz-Signature"
+    - "Signature"
+    - "Key-Pair-Id"
+    - "token"
+    - "sig="
+    - "st="
+    - "se="
+    - "/tmp/"
+    - "/session/"
+    - "/preview/"
+
+  # Predicate 9. A host earns its place here only through evidence that it
+  # blocks THIRD-PARTY fetches -- hotlink failures and hard 403s. Timeouts and
+  # undersized images are properties of one image, not of a host, and never
+  # count; letting them in would quietly push whole CDNs onto the expensive path.
+  bad_host_failures_before_caching: 3
+  bad_host_cache_ttl_days: 30
+
+# ---------------------------------------------------------------------------
+# IMAGES -- candidate collection and Tier 2 normalisation
+# ---------------------------------------------------------------------------
+images:
+  # Measured from the haat listing creator's Photos panel:
+  #   "Up to 10. The first photo is the hero buyers see everywhere."
+  #   "JPEG, PNG, WebP - up to 10 photos - 8 MB each"
+  # It takes uploaded FILES, not URLs, which is why `manifest` is the default
+  # and why url_columns is almost certainly the wrong mode for haat.
+  default_mode: manifest          # manifest | url_columns | both
+  max_images_per_product: 10      # haat's own limit; hero first
+  max_download_mb: 15             # what we are willing to pull down
+
+  # Tier 2b normalisation
+  accepted_formats: [jpeg, png, webp]   # anything else is converted to JPEG
+  max_file_mb: 8                        # haat's per-photo ceiling
+  max_edge_px: 2000
+  jpeg_quality: 88
+  jpeg_quality_steps: [78, 68]    # tried in order when output exceeds max_file_mb
+  keep_webp: true                 # haat accepts WebP, so re-encoding it to JPEG
+                                  # would be a lossy step for no benefit
+  strip_exif: true
+
+  # Candidate filtering (§5.3). Substring match on the URL, case-insensitive.
+  reject_url_substrings:
+    - "thumb"
+    - "_50x50"
+    - "sm_"
+    - "icon"
+    - "sprite"
+    - "placeholder"
+    - "blank"
+    - "1x1"
+    - "logo"
+    - "payment"
+    - "badge"
+
+  # Tracking params stripped from image URLs before validation.
+  strip_query_params: ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid", "_ga"]
+
+  # Lazy-load attributes searched in DOM order.
+  lazy_attributes: ["data-src", "data-original", "data-zoom-image", "data-large_image", "data-image", "data-srcset"]
+
+# ---------------------------------------------------------------------------
+# IMAGE HOSTS -- unreachable in manifest mode. Ordered chain; failover on
+# error, quota, or 429.
+# ---------------------------------------------------------------------------
+hosts:
+  chain: ["cloudinary", "imgbb", "imgur"]
+  max_attempts_per_host: 3
+  backoff_initial_s: 1.0
+  backoff_max_s: 30.0
+  cloudinary_folder: "haat-listings"
+
+# ---------------------------------------------------------------------------
+# CSV OUTPUT
+# ---------------------------------------------------------------------------
+csv:
+  # Measured from haat-bulk-listings-template.csv, which is the authority here:
+  # its header is UNQUOTED and its data rows are minimally quoted (only fields
+  # containing a comma carry quotes). QUOTE_ALL would emit `"title","description"`
+  # and break the byte-identical-header requirement, so minimal quoting wins.
+  #
+  # Setting this true is supported but will NOT match the template header. CSV
+  # injection is handled by the apostrophe guard below, not by quoting, so
+  # leaving it false costs no safety.
+  quote_all: false
+
+  # The header row is always written unquoted regardless of quote_all, because
+  # byte-identity with the template is a hard requirement.
+  line_terminator: "\r\n"    # template measured: CRLF throughout, trailing newline
+  excel_bom: false           # template measured: no BOM
+
+  max_title_length: 200
+  max_description_length: 5000
+
+  # Fields starting with any of these are prefixed with an apostrophe so a
+  # spreadsheet cannot execute them.
+  injection_prefixes: ["=", "+", "-", "@", "\t", "\r"]
+
+# ---------------------------------------------------------------------------
+# FIELD POLICY
+# ---------------------------------------------------------------------------
+fields:
+  # The listing creator offers exactly two availability states, as radio buttons:
+  #   "Ready stock"   -- finished pieces on the shelf; Quantity in stock required
+  #   "Made to order" -- crafted after the order lands; no stock limit
+  # The template confirms the wire value for the first is `stock`. The wire value
+  # for made-to-order is not visible in the UI.
+  #
+  # OPERATOR: one line unblocks this. Export or import a made-to-order listing and
+  # read the availability cell, then set it below. Until you do, made-to-order
+  # products get a BLANK availability plus a review flag -- emitting a guessed
+  # enum would just get the row rejected at import.
+  availability_values: ["stock"]
+  availability_in_stock_value: "stock"
+  availability_made_to_order_value: null   # OPERATOR: e.g. made_to_order
+
+  # Fields the listing creator marks required (*), plus availability, which is a
+  # radio group that always has a state selected -- so a blank one is undefined
+  # on import rather than merely empty. A blank here does not fail our CSV, but
+  # it WILL block the seller from publishing, so review.csv treats these as
+  # must-fill rather than nice-to-have.
+  required_by_haat: [title, description, category_slug, price_inr, hs_code,
+                     weight_g, length_cm, width_cm, height_cm, availability]
+
+  # Literal spellings the template uses. Not booleans.
+  yes_value: "yes"
+  blank_value: ""
+
+  rfq_default: ""        # --rfq-default
+  rfq_min_qty: null      # --rfq-min-qty, only meaningful when rfq_enabled == yes
+  bulk_only_default: ""  # --bulk-only
+
+# ---------------------------------------------------------------------------
+# PRICE + FX
+# ---------------------------------------------------------------------------
+price:
+  # Default is `blank` on purpose. haat wants the maker's INR price, which is a
+  # business decision -- not the scraped retail price of some other shop. The
+  # source amount and currency always reach review.csv so a human can set it.
+  strategy: blank        # blank | copy | convert | markup
+  markup_percent: null   # only used with `markup`; --price-strategy markup:15
+
+fx:
+  # Config-only by design: no live provider, no new outbound dependency, no new
+  # failure mode on a tool whose default price strategy is `blank` anyway.
+  # Every converted price records the rate and this date in review.csv.
+  as_of: null            # OPERATOR: ISO date, e.g. 2026-07-30
+  stale_after_days: 30
+  rates_to_inr: {}       # OPERATOR: e.g. { USD: 83.2, EUR: 90.1, GBP: 105.4 }
+
+# ---------------------------------------------------------------------------
+# HS CODES -- suggestions only, always flagged, confidence capped at medium.
+# A wrong code is a customs declaration problem for the seller, so this map
+# ships almost empty rather than plausible.
+# ---------------------------------------------------------------------------
+hs_codes:
+  # OPERATOR: only these two are evidenced (from the template samples). Every
+  # other category yields a BLANK cell plus a review flag until you extend this.
+  by_category:
+    apparel: "6206"      # cotton apparel
+    jewellery: "7113"    # silver jewellery
+  by_material_keyword: {}
+
+# ---------------------------------------------------------------------------
+# POLICY SCREEN (Rule 2.4) -- deliberately noisy. A false positive costs a human
+# ten seconds; a false negative costs a delisting.
+# ---------------------------------------------------------------------------
+policy:
+  brands_file: "haat_lister/policy/brands.txt"
+  keywords_file: "haat_lister/policy/keywords.yaml"
+
+# ---------------------------------------------------------------------------
+# LLM ASSIST -- off unless --llm
+# ---------------------------------------------------------------------------
+llm:
+  model: "claude-sonnet-5"
+  max_tokens: 1500
+  timeout_s: 60.0
+
+  # The only two things a model is used for here.
+  #
+  # It is structurally incapable of writing a price, a weight, a dimension, an
+  # HS code, a GI region, an availability or a stock count -- there is no field
+  # on the result object to put one in. Those are money, customs and legal
+  # declarations, and a confident-sounding number in one of them is strictly
+  # worse than a blank cell, because a blank cell is visibly blank.
+  rewrite_descriptions: true
+
+  # A CHOICE from taxonomy.yaml, never an invention. The model is given the
+  # exact slugs and anything else it returns is discarded with a note. Only
+  # consulted when keyword matching already fell through to the fallback.
+  suggest_categories: true
+
+  max_description_words: 120
+
+  # Cached in the ledger by prompt hash: a re-run or a --resume costs nothing.
+  cache: true
+
+  # 0 = no ceiling. Set this before a large batch if you want a hard spend cap;
+  # rows past the budget carry a note saying so rather than silently going
+  # unassisted.
+  max_calls_per_run: 0
+
+# ---------------------------------------------------------------------------
+# PATHS
+# ---------------------------------------------------------------------------
+paths:
+  taxonomy: "taxonomy.yaml"
+  ledger: "store/ledger.db"
+
+  # Every batch run writes into runs/<job_id>/ -- listings.csv, review.csv,
+  # image_manifest.csv, failed.csv, job.json and that job's images, together.
+  # `single` still writes to the paths below, so muscle memory keeps working.
+  runs_dir: "runs"
+  downloads_dir: "downloads"
+  images_dir: "images"
+  out_csv: "listings.csv"
+  review_csv: "review.csv"
+  manifest_csv: "image_manifest.csv"

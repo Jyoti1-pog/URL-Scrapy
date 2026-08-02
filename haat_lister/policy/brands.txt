@@ -1,0 +1,72 @@
+# Registered brand tokens -- counterfeit risk screening (Rule 2.4).
+#
+# A match flags the row for a human. It does NOT mean the listing is
+# counterfeit: a genuine "inspired by" description, a compatible-accessory
+# listing, or a seller's own brand sharing a word will all trip it. That is
+# intended. haat's rules prohibit unauthorised reproductions of branded goods,
+# and a ten-second human glance is cheaper than a delisting.
+#
+# Matched case-insensitively on word boundaries.
+#
+# OPERATOR: this is a starter list of frequently-counterfeited marks, not a
+# legal register. Add the brands that matter in your categories -- especially
+# any Indian designer labels you compete with or stock.
+
+# --- luxury fashion and leather goods
+louis vuitton
+gucci
+chanel
+hermes
+prada
+dior
+fendi
+burberry
+balenciaga
+versace
+givenchy
+celine
+bottega veneta
+yves saint laurent
+ysl
+
+# --- jewellery and watches
+cartier
+tiffany
+bvlgari
+rolex
+omega
+swarovski
+pandora
+
+# --- sportswear and footwear
+nike
+adidas
+puma
+reebok
+under armour
+new balance
+converse
+vans
+
+# --- high-street and denim
+levis
+levi strauss
+zara
+h&m
+uniqlo
+tommy hilfiger
+calvin klein
+ralph lauren
+lacoste
+
+# --- Indian retail and designer labels commonly imitated
+fabindia
+sabyasachi
+manish malhotra
+anita dongre
+ritu kumar
+biba
+w for woman
+good earth
+nicobar
+raw mango

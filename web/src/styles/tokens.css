@@ -1,0 +1,234 @@
+/*
+  The token system. The single source of colour and type in this codebase --
+  a hex anywhere else is a bug.
+
+  THE IDEA: indigo dyes by depth. Cloth goes into the vat and comes out pale;
+  dip it again and it goes deeper. That is a direct analogue for the thing this
+  tool's data model is actually about -- confidence -- so the palette is not a
+  mood, it is an encoding. A field extracted from JSON-LD renders at full depth;
+  one inferred from a heading sits mid-vat; one nobody could find is the undyed
+  ground.
+
+  Which forces one rule that shapes everything else:
+
+      INDIGO IS SPENT ENTIRELY ON THE DATA. THE CHROME GETS NONE.
+
+  No indigo buttons, no indigo nav, no indigo links, no indigo focus ring. If
+  depth means confidence, every other indigo on screen competes with the
+  encoding. This is the single biggest departure from what "an operator tool,
+  in indigo" would otherwise become -- a slate-blue admin panel with rounded
+  cards and a blue-600 primary button -- and it is why this does not look like
+  one.
+
+  Two corollaries worth stating because they look like omissions:
+
+  - NO CARDS. White is load-bearing here: --resist is the ground of an editable
+    cell, the deliberate absence of dye in a bandhani print. A white card would
+    say "editable" everywhere and destroy the semantic. Separation is by rule
+    and space.
+
+  - NO DARK MODE. Inverted, the depth metaphor reverses -- pale would read as
+    deep -- and every contrast below would have to be re-measured. A bad dark
+    mode is worse than none.
+
+  CONTRAST, measured rather than assumed (against --ground):
+
+      dye-4  14.47:1     dye-3  8.77:1     dye-2  4.56:1     dye-1  1.77:1  x
+      madder  7.28:1     brass  5.73:1
+
+  dye-1 fails AA badly, and that is not a defect to fix. The "no value" tier has
+  no text -- it is an empty cell with a dotted outline. Text uses dye-4, dye-3,
+  madder and brass only; dye-2 clears AA with no margin, so it is reserved for
+  short mono labels at 13px and never for prose.
+
+  And because adjacent depths sit only 1.65-2.57:1 apart, colour never carries
+  meaning alone: every state below has a glyph and a weight too.
+*/
+
+:root {
+  /* -- ground ------------------------------------------------------------
+     Cool and slightly grey. Deliberately NOT the storefront's warm #F5F1EA:
+     this is the workbench behind the boutique, not the boutique. */
+  --ground: #f1f3f6;
+  --ground-sunk: #e9ecf1;
+  --resist: #ffffff;
+  --rule: #d8dde6;
+  --rule-strong: #c3cbd8;
+
+  /* -- the vat: one dye, four depths. Also the type ramp. --------------- */
+  --dye-1: #afb9ce; /* undyed  - fills only, never text */
+  --dye-2: #5a6e9b; /* one dip - mono labels >=13px only */
+  --dye-3: #2c4372; /* two dips */
+  --dye-4: #16203c; /* full depth. This is the ink. */
+
+  --ink: var(--dye-4);
+  --ink-soft: var(--dye-2);
+
+  /* -- reserved words ---------------------------------------------------
+     If madder appears on anything that is not a failure, or brass on anything
+     that is not awaiting a human, the encoding is broken. */
+  --madder: #96261f;
+  --madder-wash: #f7eceb;
+  --brass: #7a5a12;
+  --brass-wash: #f6f1e4;
+
+  /* -- type -------------------------------------------------------------
+     Three roles, three faces, all self-hosted. Public Sans rather than Inter
+     on purpose: Inter is the default smell this is trying to avoid. */
+  --font-display: "Bricolage Grotesque", Georgia, serif;
+  --font-body: "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --size-11: 0.6875rem;
+  --size-12: 0.75rem;
+  --size-13: 0.8125rem;
+  --size-15: 0.9375rem;
+  --size-18: 1.125rem;
+  --size-24: 1.5rem;
+  --size-34: 2.125rem;
+
+  --lh-tight: 1.25;
+  --lh-body: 1.55;
+
+  /* -- space: a 4px grid, named by use rather than by size ------------- */
+  --gap-hair: 0.25rem;
+  --gap-tight: 0.5rem;
+  --gap: 1rem;
+  --gap-wide: 1.75rem;
+  --gap-section: 3rem;
+
+  --rail-width: 200px; /* 19 columns x 8px + gaps. See FillGrid. */
+  --bench-max: 62rem;
+
+  --tap: 180ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --tap: 0ms;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Fonts. Local files, no CDN: this must work with the wifi off.
+   -------------------------------------------------------------------------- */
+
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("/fonts/bricolage.woff2") format("woff2");
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains.woff2") format("woff2");
+  font-weight: 400 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Public Sans";
+  src: url("/fonts/publicsans.woff2") format("woff2");
+  font-weight: 400 600;
+  font-display: swap;
+}
+
+/* --------------------------------------------------------------------------
+   Base
+   -------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--size-15);
+  line-height: var(--lh-body);
+  /* Tabular figures everywhere. A column of prices that does not align
+     vertically is a defect in a CSV tool. */
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 500;
+  line-height: var(--lh-tight);
+  letter-spacing: -0.011em;
+}
+
+code,
+kbd,
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.92em;
+}
+
+a {
+  color: var(--ink);
+  text-decoration-color: var(--dye-1);
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  text-decoration-color: var(--ink);
+}
+
+/* One focus ring, ink not indigo, visible on every ground. */
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: 1px;
+}
+
+/* --------------------------------------------------------------------------
+   Confidence and status. Colour is never alone -- glyph and weight ride along.
+   -------------------------------------------------------------------------- */
+
+.depth-high {
+  color: var(--dye-4);
+  font-weight: 500;
+}
+.depth-medium {
+  color: var(--dye-3);
+}
+.depth-low {
+  color: var(--dye-2);
+}
+/* Caught by the audit, and it was this file's own rule being broken: dye-1 is
+   1.77:1 and documented as fills-only, but .depth-none was painting text with
+   it. There are three usable TEXT depths, not four -- the fourth tier has no
+   text by definition, and where a literal "0" or an em-dash has to stand in for
+   it, the numeral itself is the signal rather than the shade. */
+.depth-none {
+  color: var(--dye-2);
+  font-weight: 400;
+}
+
+.is-failed {
+  color: var(--madder);
+  font-weight: 500;
+}
+.is-review {
+  color: var(--brass);
+  font-weight: 500;
+}
+.is-edited {
+  background: var(--resist);
+  color: var(--ink);
+  font-weight: 500;
+}

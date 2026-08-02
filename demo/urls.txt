@@ -1,0 +1,29 @@
+# Demo catalogue. Two steps:
+#
+#   1. python demo/shop.py
+#   2. config.yaml -> fetch.allow_private_hosts: ["127.0.0.1"]
+#
+# Step 2 is needed because the SSRF guard refuses loopback by default -- this
+# tool fetches URLs typed by whoever can reach it, so 127.0.0.1 is exactly the
+# address it should not follow without being told to.
+#
+# Blank lines and lines starting with # are skipped, so this file is also a
+# demonstration of the input format.
+
+# Easy: clean JSON-LD, Stage A alone should handle these.
+http://127.0.0.1:8799/plain/0
+http://127.0.0.1:8799/plain/1
+http://127.0.0.1:8799/plain/2
+
+# JavaScript shell: the static HTML has no title, no description, no photos.
+# These are the only rows that should launch a browser.
+http://127.0.0.1:8799/spa/0
+http://127.0.0.1:8799/spa/1
+
+# Images 403 for anyone without a Referer. Tier 1 predicate 7 should catch it,
+# and in the default manifest mode the files are downloaded and kept anyway.
+http://127.0.0.1:8799/hotlinked/0
+
+# The same product as plain/0 with a tracking parameter. Should be recognised
+# as a duplicate and fetched once, not twice.
+http://127.0.0.1:8799/plain/0?utm_source=newsletter

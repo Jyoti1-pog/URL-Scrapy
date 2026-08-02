@@ -1,0 +1,91 @@
+# Prohibited-content screening vocabulary (Rule 2.4).
+#
+# This screen is DELIBERATELY NOISY. A false positive costs a human ten seconds;
+# a false negative costs a delisting, a seized parcel, or worse. Nothing here
+# ever drops a row -- every hit is a flag on a row that still gets written.
+#
+# Terms are matched case-insensitively on word boundaries against the title and
+# description. Multi-word terms are matched as phrases.
+#
+# OPERATOR: extend freely. Adding a term you care about is always safe.
+
+categories:
+  # Indian antiquities law restricts export of objects over 100 years old.
+  # "Vintage" and "antique" are also used loosely as style words, which is
+  # exactly why a human looks rather than the tool deciding.
+  antiquities:
+    label: Possible antiquities restriction
+    terms:
+      - antique
+      - antiquity
+      - vintage
+      - "over 100 years"
+      - "100 years old"
+      - "colonial era"
+      - colonial-era
+      - "pre-independence"
+      - heirloom
+      - excavated
+      - archaeological
+
+  # CITES and the Indian Wildlife Protection Act. Several of these are also
+  # ordinary craft materials (shell buttons, bone inlay), so they are flags,
+  # not blocks.
+  wildlife:
+    label: Wildlife / CITES risk
+    terms:
+      - ivory
+      - tusk
+      - bone
+      - shell
+      - tortoise
+      - turtle
+      - "peacock feather"
+      - peacock
+      - fur
+      - "exotic leather"
+      - python
+      - crocodile
+      - alligator
+      - snakeskin
+      - "shahtoosh"
+      - coral
+      - "elephant hair"
+
+  # Export and courier restrictions apply to blades regardless of craft intent.
+  weapons:
+    label: Weapon / blade restriction
+    terms:
+      - knife
+      - knives
+      - blade
+      - dagger
+      - sword
+      - katar
+      - kirpan
+      - firearm
+      - ammunition
+      - bullet
+      - gun
+      - machete
+      - axe
+
+  # A GI tag is an Indian government certification. Any mention on the source
+  # page becomes a QUESTION for a human -- gi_region stays blank regardless.
+  gi_claim:
+    label: GI claim needing registry confirmation
+    terms:
+      - "gi tag"
+      - "gi-tag"
+      - "g.i. tag"
+      - "geographical indication"
+      - "gi certified"
+      - "gi registered"
+      - certified
+      - authentic
+      - genuine
+      - registry
+
+# Terms that specifically indicate a GI claim rather than a general policy hit.
+# A match here also populates review.csv's `gi_mention_found` column.
+gi_categories: [gi_claim]

@@ -1,0 +1,435 @@
+"""TIER 1 -- validate the source page's own direct image URL.
+
+This is the gate that keeps the expensive path shut, so it is written to be
+boring and read often. Nothing here downloads a file to keep, and nothing here
+can reach an image host.
+
+Tier 1 runs on every single row, always. It is never skipped.
+
+PREDICATE ORDER
+---------------
+The nine predicates keep their spec numbers -- `reason` strings and
+`ValidationResult.predicate` map straight back to the spec -- but they are
+EVALUATED cheapest-first:
+
+    1. syntax              pure string
+    8. signed / expiring   pure string
+    9. host reputation     local cache lookup
+    2. reachable           <-- first network call
+    3. redirect sanity
+    4. content-type
+    5. size floor
+    6. decodable + dimensions
+    7. hotlink test        <-- second network call
+
+Predicates 8 and 9 were specified last. Running them there means a URL we can
+reject for free still costs up to seven checks and two round trips first, which
+is backwards for a tool whose whole design is cheap-path-first: on a 5,000-URL
+batch against one blocking CDN that is thousands of avoidable requests. Moving
+them ahead of the network preserves every stated guarantee -- `tier1_attempted`
+is still True on every row, the reasons are unchanged, and predicate 9 remains a
+cache rather than a bypass.
+
+Evaluation short-circuits on the first failure: predicate 6 never runs if
+predicate 4 already failed.
+"""
+
+from __future__ import annotations
+
+import io
+from dataclasses import dataclass
+
+import httpx
+from PIL import Image, UnidentifiedImageError
+
+from ..config import ValidatorConfig
+from ..models import ValidationResult
+from ..store.ledger import Ledger
+from ..utils.logging import get_logger
+from ..utils.netguard import BlockedHost, request_hook
+from ..utils.urls import host_of
+
+log = get_logger(__name__)
+
+# Magic bytes for the formats a marketplace photo could plausibly be. Checked
+# before Pillow so that an HTML block page served with `Content-Type: image/jpeg`
+# is rejected as undecodable rather than tying up the decoder.
+_MAGIC = {
+    b"\xff\xd8\xff": "jpeg",
+    b"\x89PNG\r\n\x1a\n": "png",
+    b"GIF87a": "gif",
+    b"GIF89a": "gif",
+    b"BM": "bmp",
+}
+
+# Paths that mean "you have been redirected to a page, not an image".
+_INTERSTITIAL_MARKERS = (
+    "/login",
+    "/signin",
+    "/sign-in",
+    "/auth",
+    "/consent",
+    "/challenge",
+    "/captcha",
+    "/blocked",
+    "/access-denied",
+)
+
+
+def sniff_format(head: bytes) -> str | None:
+    for magic, name in _MAGIC.items():
+        if head.startswith(magic):
+            return name
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head[4:8] == b"ftyp":  # avif / heic share the ISO-BMFF container
+        return "avif"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Pure predicates -- no network, trivially testable
+# ---------------------------------------------------------------------------
+
+
+def check_syntax(url: str) -> str | None:
+    """Predicate 1. Absolute http(s) with a host."""
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return "bad_syntax"
+    if parsed.scheme not in ("http", "https") or not parsed.host:
+        return "bad_syntax"
+    return None
+
+
+def check_not_signed(url: str, tokens: list[str]) -> str | None:
+    """Predicate 8. A URL that works today and 404s in six hours is worthless
+    in a live listing, so we would rather host our own copy."""
+    for token in tokens:
+        # Mixed-case tokens (X-Amz-Signature, Key-Pair-Id) are matched as given;
+        # lowercase ones are matched case-insensitively.
+        if token.lower() == token:
+            if token in url.lower():
+                return "signed_or_expiring_url"
+        elif token in url:
+            return "signed_or_expiring_url"
+    return None
+
+
+def check_host_reputation(url: str, ledger: Ledger | None, cfg: ValidatorConfig) -> str | None:
+    """Predicate 9. A cache, not a bypass: the attempt still counts as made, it
+    just resolves instantly from evidence we already paid for."""
+    if ledger is None:
+        return None
+    host = host_of(url)
+    if host and ledger.is_bad_hotlink_host(
+        host, cfg.bad_host_failures_before_caching, cfg.bad_host_cache_ttl_days
+    ):
+        return "host_known_to_block"
+    return None
+
+
+def check_content_type(content_type: str | None) -> str | None:
+    """Predicate 4. `text/html` here means a block page is being served."""
+    if not content_type or not content_type.split(";")[0].strip().lower().startswith("image/"):
+        return "wrong_content_type"
+    return None
+
+
+def check_size_floor(content_length: int | None, min_bytes: int) -> str | None:
+    """Predicate 5. Kills tracking pixels and placeholders.
+
+    A missing Content-Length does NOT fail here. Chunked responses and plenty of
+    CDNs omit it, and rejecting those would throw away good images; predicate 6
+    enforces the floor on bytes actually read instead.
+    """
+    if content_length is not None and content_length < min_bytes:
+        return "too_small"
+    return None
+
+
+def check_redirect_chain(response: httpx.Response, max_hops: int) -> str | None:
+    """Predicate 3. At most `max_hops`, and the destination must be an image.
+
+    Only applies when a redirect actually happened. A URL that serves HTML
+    without redirecting is predicate 4's business, and reporting it here would
+    tell the operator to look for a redirect that does not exist.
+    """
+    if not response.history:
+        return None
+    if len(response.history) > max_hops:
+        return "too_many_redirects"
+    final_path = (response.url.path or "").lower()
+    if any(marker in final_path for marker in _INTERSTITIAL_MARKERS):
+        return "redirect_to_interstitial"
+    if "text/html" in response.headers.get("content-type", "").lower():
+        return "redirect_to_html"
+    return None
+
+
+def check_dimensions(image: Image.Image, cfg: ValidatorConfig) -> str | None:
+    """Predicate 6, second half. haat is a premium marketplace; thumbnails are
+    not listable."""
+    width, height = image.size
+    if width < cfg.min_width or height < cfg.min_height:
+        return "below_min_dimensions"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# The validator
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Probe:
+    response: httpx.Response
+    content_type: str | None
+    content_length: int | None
+
+
+class Tier1Validator:
+    """Runs the nine predicates against one candidate URL."""
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        cfg: ValidatorConfig,
+        ledger: Ledger | None = None,
+        hotlink_test: bool | None = None,
+        allow_private_hosts: list[str] | None = None,
+    ) -> None:
+        self._client = client
+        self._cfg = cfg
+        self._ledger = ledger
+        self._hotlink_test = cfg.hotlink_test if hotlink_test is None else hotlink_test
+        # Defaults to empty rather than to fetch.allow_private_hosts: a caller
+        # that forgets to pass it gets the guarded behaviour, not the permissive
+        # one. The resolver passes the real list.
+        self._allow_hosts = allow_private_hosts or []
+
+    async def validate(self, url: str) -> ValidationResult:
+        """True only if all nine predicates pass. Never raises."""
+        cfg = self._cfg
+
+        # --- free checks, before any network call --------------------------
+        if reason := check_syntax(url):
+            return ValidationResult(url=url, ok=False, reason=reason, predicate=1)
+        if reason := check_not_signed(url, cfg.signed_url_tokens):
+            return ValidationResult(url=url, ok=False, reason=reason, predicate=8)
+        if reason := check_host_reputation(url, self._ledger, cfg):
+            return ValidationResult(url=url, ok=False, reason=reason, predicate=9)
+
+        # --- predicate 2: reachable ---------------------------------------
+        try:
+            probe = await self._probe(url)
+        except _ProbeFailed as exc:
+            return ValidationResult(url=url, ok=False, reason=exc.reason, predicate=2)
+
+        def result(
+            ok: bool,
+            reason: str,
+            predicate: int | None = None,
+            width: int | None = None,
+            height: int | None = None,
+        ) -> ValidationResult:
+            return ValidationResult(
+                url=url,
+                ok=ok,
+                reason=reason,
+                predicate=predicate,
+                content_type=probe.content_type,
+                content_length=probe.content_length,
+                width=width,
+                height=height,
+            )
+
+        if reason := check_redirect_chain(probe.response, cfg.max_redirect_hops):
+            return result(False, reason, 3)
+        if reason := check_content_type(probe.content_type):
+            return result(False, reason, 4)
+        if reason := check_size_floor(probe.content_length, cfg.min_bytes):
+            return result(False, reason, 5)
+
+        # --- predicate 6: decode far enough to read the real dimensions ----
+        try:
+            image, bytes_read = await self._open_header(url)
+        except _ProbeFailed as exc:
+            return result(False, exc.reason, 6)
+
+        if probe.content_length is None and bytes_read < cfg.min_bytes:
+            # Deferred from predicate 5: no Content-Length, and the whole file
+            # turned out to be smaller than the floor.
+            return result(False, "too_small", 5)
+
+        width, height = image.size
+        if reason := check_dimensions(image, cfg):
+            return result(False, reason, 6, width, height)
+
+        # --- predicate 7: would a third party get this image? --------------
+        if self._hotlink_test and not await self._hotlink_ok(url):
+            self._record_hotlink_failure(url)
+            return result(False, "hotlink_blocked", 7, width, height)
+
+        if self._ledger is not None:
+            self._ledger.clear_bad_host(host_of(url))
+        return result(True, "direct_ok", None, width, height)
+
+    # -- network helpers ---------------------------------------------------
+
+    async def _probe(self, url: str) -> _Probe:
+        """HEAD, falling back to a ranged GET where HEAD is not honoured."""
+        response = await self._request_with_fallback(url)
+        if response.status_code >= 400:
+            raise _ProbeFailed(f"http_{response.status_code}")
+        return _Probe(
+            response=response,
+            content_type=response.headers.get("content-type"),
+            content_length=_int_or_none(response.headers.get("content-length")),
+        )
+
+    async def _request_with_fallback(self, url: str) -> httpx.Response:
+        try:
+            response = await self._client.head(url, follow_redirects=True)
+            # Plenty of CDNs simply do not implement HEAD.
+            if response.status_code in (403, 405, 501):
+                return await self._client.get(
+                    url, headers={"Range": "bytes=0-2047"}, follow_redirects=True
+                )
+            return response
+        except httpx.TooManyRedirects as exc:
+            raise _ProbeFailed("too_many_redirects") from exc
+        except httpx.TimeoutException as exc:
+            raise _ProbeFailed("timeout") from exc
+        except httpx.ConnectError as exc:
+            raise _ProbeFailed("dns_error") from exc
+        except httpx.HTTPError as exc:
+            raise _ProbeFailed("request_failed") from exc
+
+    async def _open_header(self, url: str) -> tuple[Image.Image, int]:
+        """Stream only as far as Pillow needs to read the dimensions.
+
+        JPEG and PNG give up their size in the first few KB, which is the whole
+        point of probing rather than downloading. WebP and AVIF do not -- Pillow
+        will not open a partial file of either -- so when the probe fails we
+        keep reading up to `max_probe_bytes` before calling it undecodable.
+        Without that, every WebP image on the web would fail Tier 1, and haat's
+        own storage serves WebP.
+        """
+        buffer = bytearray()
+        threshold = self._cfg.header_probe_bytes
+        hard_cap = max(self._cfg.max_probe_bytes, threshold)
+        image: Image.Image | None = None
+
+        try:
+            async with self._client.stream("GET", url, follow_redirects=True) as response:
+                if response.status_code >= 400:
+                    raise _ProbeFailed(f"http_{response.status_code}")
+
+                async for chunk in response.aiter_bytes(8192):
+                    buffer.extend(chunk)
+                    if len(buffer) < threshold:
+                        continue
+
+                    if len(buffer) >= 16 and not sniff_format(bytes(buffer[:16])):
+                        # Not an image at all -- an HTML block page wearing an
+                        # image content-type. No amount of extra bytes helps.
+                        raise _ProbeFailed("undecodable")
+
+                    if (image := _try_open(bytes(buffer))) is not None:
+                        break
+                    if len(buffer) >= hard_cap:
+                        break
+                    threshold = min(threshold * 4, hard_cap)
+        except _ProbeFailed:
+            raise
+        except httpx.TimeoutException as exc:
+            raise _ProbeFailed("timeout") from exc
+        except httpx.HTTPError as exc:
+            raise _ProbeFailed("request_failed") from exc
+
+        if not buffer or not sniff_format(bytes(buffer[:16])):
+            raise _ProbeFailed("undecodable")
+
+        # The stream may have ended before we reached a threshold -- a small
+        # file, which is legitimate and handled by the size floor.
+        image = image or _try_open(bytes(buffer))
+        if image is None:
+            raise _ProbeFailed("undecodable")
+        return image, len(buffer)
+
+    async def _hotlink_ok(self, url: str) -> bool:
+        """Predicate 7. Re-request as a stranger would: no Referer, neutral UA,
+        a brand-new session with no cookies.
+
+        Many CDNs serve a browser sitting on the product page and 403 everyone
+        else, which is exactly what a haat listing would be.
+
+        The fresh session is the point, but it must not also be a fresh hole:
+        image URLs come out of a shop's own HTML, so a compromised page could
+        point one at a private address. The SSRF hook rides along -- it is about
+        WHERE we connect, not about session state. The earlier predicates would
+        usually block first; "usually" is not a security property.
+        """
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=self._client.timeout,
+            headers={"User-Agent": self._cfg.hotlink_neutral_user_agent},
+            cookies=None,
+            event_hooks={"request": [request_hook(self._allow_hosts)]},
+        ) as stranger:
+            try:
+                response = await stranger.get(url, headers={"Range": "bytes=0-2047"})
+            except BlockedHost:
+                return False
+            except httpx.HTTPError:
+                return False
+        if response.status_code >= 400:
+            return False
+        return check_content_type(response.headers.get("content-type")) is None
+
+    def _record_hotlink_failure(self, url: str) -> None:
+        if self._ledger is None:
+            return
+        if host := host_of(url):
+            count = self._ledger.record_hotlink_failure(host)
+            log.debug("Hotlink failure %d for %s", count, host)
+
+
+def _try_open(data: bytes) -> Image.Image | None:
+    """Pillow reads the header only, which is all we need for `.size`."""
+    try:
+        return Image.open(io.BytesIO(data))
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
+
+
+class _ProbeFailed(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _int_or_none(value: str | None) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+async def validate_all_candidates(
+    candidates: list[str], validator: Tier1Validator
+) -> tuple[ValidationResult | None, list[ValidationResult]]:
+    """Walk candidates in rank order and stop at the first that passes.
+
+    Returns (winner or None, every result including the winner). Tier 1 stopping
+    early is the whole point: on a healthy page this is one HEAD request.
+    """
+    results: list[ValidationResult] = []
+    for url in candidates:
+        result = await validator.validate(url)
+        results.append(result)
+        if result.ok:
+            return result, results
+    return None, results

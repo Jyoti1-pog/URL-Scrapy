@@ -1,0 +1,120 @@
+# haat category taxonomy.
+#
+# Built from the haat seller dashboard listing creator (Category -> Shelf), plus
+# the two slug pairs evidenced in haat-bulk-listings-template.csv.
+#
+# CONFIRMED vs DERIVED
+# --------------------
+# Four slugs are confirmed against real haat data:
+#     apparel / womens-fashion      (template sample row 1)
+#     jewellery / earrings          (template sample row 2)
+#   ...plus the five parent slugs, which appear in haat's live category page URLs.
+#
+# Every other subcategory slug below is DERIVED from those, using the slug rule
+# they demonstrate:
+#     lowercase, spaces -> hyphen, apostrophes dropped, "&" dropped
+#     "Women's fashion"   -> womens-fashion
+#     "Leather & Bags"    -> leather-bags
+# Each derived entry is marked `derived: true`.
+#
+# WHY THAT MARK MATTERS: an unrecognised slug is a hard row failure here, but a
+# slug that is wrong in BOTH this file and the CSV will pass our validation and
+# then be rejected by haat's importer. Verify the derived ones before a large
+# run -- the cheapest check is a single-row manual import, or reading the slug
+# out of a live category page URL. Correct any that are wrong and drop the mark.
+
+complete: true
+
+fallback_category: more-crafts
+
+categories:
+  handwoven-textiles:
+    label: Handwoven Textiles
+    keywords: [saree, sari, handloom, khadi, dupatta, stole, shawl, ikat, kalamkari, block print, weave, woven, pashmina, fabric, textile]
+    subcategories:
+      sarees:
+        label: Sarees
+        derived: true
+        keywords: [saree, sari, kanjivaram, banarasi, chanderi, tussar, dola silk]
+      dupattas-stoles:
+        label: Dupattas & stoles
+        derived: true
+        keywords: [dupatta, stole, shawl, odhni, chunni]
+      home-textiles:
+        label: Home textiles
+        derived: true
+        keywords: [cushion, bedsheet, bedcover, quilt, razai, throw, table runner, napkin, curtain, durrie, rug]
+      fabric-by-the-metre:
+        label: Fabric by the metre
+        derived: true
+        keywords: [fabric, yardage, running metre, per metre, by the metre, cloth]
+
+  apparel:
+    label: Apparel
+    keywords: [kurta, kurti, shirt, dress, blouse, trouser, jacket, apparel, clothing, wear]
+    subcategories:
+      mens-fashion:
+        label: Men's fashion
+        derived: true
+        keywords: [men, mens, kurta pyjama, nehru jacket, sherwani, dhoti]
+      womens-fashion:
+        label: Women's fashion            # CONFIRMED: template sample row 1
+        keywords: [women, womens, kurti, kurta, saree blouse, lehenga, salwar, anarkali]
+      kids:
+        label: Kids
+        derived: true
+        keywords: [kids, child, children, baby, infant, toddler, boys, girls]
+
+  jewellery:
+    label: Jewellery
+    keywords: [jewellery, jewelry, silver, gold, kundan, meenakari, temple jewellery]
+    subcategories:
+      necklaces:
+        label: Necklaces
+        derived: true
+        keywords: [necklace, choker, haar, mala, chain]
+      earrings:
+        label: Earrings                   # CONFIRMED: template sample row 2
+        keywords: [earring, jhumka, jhumki, stud, hoop, chandbali, danglers]
+      rings:
+        label: Rings
+        derived: true
+        keywords: [ring, band, signet]
+      jewellery-sets:
+        label: Jewellery sets
+        derived: true
+        keywords: [jewellery set, jewelry set, bridal set, necklace set, parure]
+      loose-gemstones:
+        label: Loose gemstones
+        derived: true
+        keywords: [gemstone, loose stone, carat, cabochon, rough stone, uncut]
+      pendants:
+        label: Pendants
+        derived: true
+        keywords: [pendant, locket, charm]
+
+  leather-bags:
+    label: Leather & Bags
+    keywords: [bag, leather, tote, satchel, clutch, wallet, purse, backpack, sling]
+    subcategories:
+      handbags:
+        label: Handbags
+        derived: true
+        keywords: [handbag, tote, satchel, clutch, sling, shoulder bag, backpack, potli]
+      wallets-small-goods:
+        label: Wallets & small goods
+        derived: true
+        keywords: [wallet, cardholder, card holder, coin purse, pouch, passport cover, key ring]
+      belts-accessories:
+        label: Belts & accessories
+        derived: true
+        keywords: [belt, strap, buckle, braces, suspender]
+
+  more-crafts:
+    label: More Crafts
+    # The listing creator calls this "Other -- my craft isn't listed" and asks the
+    # seller to name their category, which is what `custom_category` carries.
+    # There are no shelves under it: a row landing here gets a blank
+    # subcategory_slug plus a review flag, which is the honest answer.
+    keywords: []
+    subcategories: {}
