@@ -60,6 +60,8 @@ class Renderer:
         self._browser: Any = None
         self._context: Any = None
         self.pages_rendered = 0
+        # How often the gallery wait actually found something, for the summary.
+        self.galleries_seen = 0
         self.unavailable_reason: str | None = None
 
     @property
@@ -129,6 +131,41 @@ class Renderer:
     ) -> None:
         await self.close()
 
+    async def _scroll(self, page: Any) -> None:
+        """One pass down and back. Never fails the render."""
+        try:
+            await page.evaluate(
+                """async () => {
+                     const step = Math.max(400, window.innerHeight * 0.9);
+                     for (let y = 0; y < document.body.scrollHeight; y += step) {
+                       window.scrollTo(0, y);
+                       await new Promise(r => setTimeout(r, 60));
+                     }
+                     window.scrollTo(0, 0);
+                   }"""
+            )
+        except Exception as exc:  # noqa: BLE001 -- a page that refuses to scroll still renders
+            log.debug("Stage B could not scroll %s: %s", page.url, exc)
+
+    async def _await_gallery(self, page: Any) -> bool:
+        """Wait for something that looks like a gallery. Best-effort by design.
+
+        A page with no gallery is a fact about the page, not an error -- the row
+        gets `no_candidates_extracted` and the operator gets told. So a miss
+        costs `gallery_wait_ms` once and the render carries on.
+        """
+        cfg = self._cfg
+        if not cfg.gallery_selectors or not cfg.gallery_wait_ms:
+            return False
+        selector = ", ".join(cfg.gallery_selectors)
+        try:
+            await page.wait_for_selector(selector, timeout=cfg.gallery_wait_ms, state="attached")
+        except Exception:  # noqa: BLE001 -- playwright raises a timeout type we do not import here
+            log.debug("Stage B saw no gallery on %s within %dms", page.url, cfg.gallery_wait_ms)
+            return False
+        self.galleries_seen += 1
+        return True
+
     async def fetch(self, url: str) -> FetchResult:
         """Render one page. Raises RenderUnavailable or FetchError, never junk."""
         from playwright.async_api import Error as PlaywrightError
@@ -141,6 +178,16 @@ class Renderer:
         page = await self._context.new_page()
         try:
             response = await page.goto(url, wait_until=cfg.wait_until, timeout=cfg.timeout_ms)
+
+            # The reason Stage B was launched is almost always the gallery, so
+            # it is worth doing the two things that actually make one appear
+            # before reading the DOM. `networkidle` does neither: a lazy-load
+            # gallery wired to IntersectionObserver never requests anything, so
+            # the network is idle precisely because nothing has happened yet.
+            if cfg.scroll_before_parse:
+                await self._scroll(page)
+            await self._await_gallery(page)
+
             if cfg.settle_ms:
                 # Hydration and lazy-load galleries often land just after the
                 # wait condition is satisfied.

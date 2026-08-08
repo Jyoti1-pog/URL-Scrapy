@@ -13,6 +13,7 @@
 
 import type { JobRow } from "../api/client";
 import type { JobEvent } from "../hooks/useJobEvents";
+import { WhyNoPhoto } from "../routes/Diagnose";
 
 export interface LiveRow extends JobRow {
   stage?: string;
@@ -41,6 +42,8 @@ export function mergeRows(rows: JobRow[], events: JobEvent[]): LiveRow[] {
       title: "",
       status: "",
       image_tier: "",
+      image_problem: "",
+      image_explanation: "",
       reason: "",
       needs_human: false,
       missing: [],
@@ -61,6 +64,8 @@ export function mergeRows(rows: JobRow[], events: JobEvent[]): LiveRow[] {
         title: event.data.title ?? current.title,
         status: event.data.status ?? current.status,
         image_tier: event.data.image_tier ?? current.image_tier,
+        image_problem: event.data.image_problem ?? current.image_problem,
+        image_explanation: event.data.image_explanation ?? current.image_explanation,
         reason: event.data.reason ?? current.reason,
         needs_human: event.data.needs_human ?? current.needs_human,
         missing: event.data.missing ?? current.missing,
@@ -121,9 +126,16 @@ export function RowStream({ rows, onPick }: { rows: LiveRow[]; onPick?: (r: Live
               {row.title || <span className="depth-low mono">{shortUrl(row.source_url)}</span>}
             </span>
             <TierBadge row={row} />
+            {/* §1.4: no flag on a row that never produced a record. `⚑10` used
+                to appear on pages that never loaded -- the missing-required
+                counter running against an empty record. A row with no content
+                has one reason, not ten missing fields. */}
             <span className="row-flag mono is-review" title={row.missing.join(", ")}>
-              {row.needs_human ? `⚑ ${row.missing.length || ""}` : ""}
+              {row.needs_human && row.missing.length > 0 ? `⚑ ${row.missing.length}` : ""}
             </span>
+            {/* Only where it can answer something. A "why" link on a row that
+                got its photo is noise. */}
+            {noPhoto(row) ? <WhyNoPhoto url={row.source_url} /> : <span />}
           </li>
         ))}
       </ol>
@@ -142,9 +154,30 @@ export function RowStream({ rows, onPick }: { rows: LiveRow[]; onPick?: (r: Live
   hosted is brass and none is madder, on purpose: a rising hosted ratio is a
   thing an operator should notice while it is happening, not in a summary.
 */
+/** A row an operator would ask "why?" about: it finished, and it has no photo.
+ *  Includes both failure classes, because a refusal is precisely the case the
+ *  report was built to explain. */
+export function noPhoto(row: LiveRow): boolean {
+  return (
+    Boolean(row.outcome) &&
+    (row.image_tier === "none" || row.outcome === "failed" || row.outcome === "refused")
+  );
+}
+
 function TierBadge({ row }: { row: LiveRow }) {
-  if (row.outcome === "failed") {
-    return <span className="row-tier mono is-failed">{row.reason || "failed"}</span>;
+  if (row.outcome === "failed" || row.outcome === "refused") {
+    // Refused is brass, failed is madder. The tool was correct to stop on a
+    // refusal, and colouring it like a breakage tells the operator to go and
+    // fix something that is not broken.
+    const refused = row.outcome === "refused";
+    return (
+      <span
+        className={`row-tier mono ${refused ? "is-review" : "is-failed"}`}
+        title={row.image_explanation || row.reason}
+      >
+        {row.image_problem || row.reason || row.outcome}
+      </span>
+    );
   }
   const tone =
     row.image_tier === "direct" || row.image_tier === "local"
@@ -155,8 +188,11 @@ function TierBadge({ row }: { row: LiveRow }) {
           ? "is-failed"
           : "depth-none";
   return (
-    <span className={`row-tier mono ${tone}`} title={row.reason}>
-      {row.image_tier}
+    <span
+      className={`row-tier mono ${tone}`}
+      title={row.image_explanation || row.reason}
+    >
+      {row.image_tier === "none" && row.image_problem ? row.image_problem : row.image_tier}
     </span>
   );
 }

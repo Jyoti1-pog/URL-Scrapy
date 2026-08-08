@@ -43,6 +43,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from . import preflight
 from .config import Settings
 from .enrich.rewrite import LlmEnricher
 from .extract.plugins import PluginRegistry
@@ -50,17 +51,21 @@ from .fetch.rendered import Renderer
 from .images.pipeline import ImageResolver
 from .jobs import (
     FAILED,
-    LISTED,
+    NEEDS_HUMAN,
+    REFUSED,
     JobPlan,
+    add_to_master,
     assert_accounted,
     job_paths,
     new_job_id,
     render_projections,
+    terminal_state,
     update_job_json,
     write_job_json,
 )
 from .models import DescriptionMode, ImageMode, ProductRecord, Provenance, RowStatus
 from .output.csv_writer import cell_depths
+from .output.master import MasterStats
 from .output.ordered_writer import OrderedCsvWriter
 from .output.review_writer import missing_required, needs_review
 from .pipeline import new_record, process_url
@@ -200,6 +205,18 @@ class BatchStats:
     stopped_early: bool = False
     peak_in_flight: int = 0
 
+    # The site declined and the tool was correct to stop. Counted apart from
+    # `failed` because they are not degrees of one thing: a refusal cannot be
+    # retried into a success, and reporting them together made a working robots
+    # check look like a bug in the fetcher.
+    refused: int = 0
+
+    # What the accumulating sheet did with this job's rows, and why not if it
+    # could not. `None` means master was off for this run -- an absent object
+    # rather than a zeroed one, so "off" and "added nothing" cannot be confused.
+    master: MasterStats | None = None
+    master_error: str = ""
+
 
 @dataclass
 class BatchOptions:
@@ -211,6 +228,15 @@ class BatchOptions:
     seller_note: str | None = None
     description_mode: DescriptionMode = DescriptionMode.RAW
     checkpoint_every: int = CHECKPOINT_EVERY
+
+    # Fold this job's rows into runs/master.csv when it completes.
+    #
+    # The default differs by caller and that is deliberate, not an oversight:
+    # the web operator's mental model is one sheet that fills up, so the console
+    # passes True. A scripted CLI user is usually building one file for one
+    # purpose and wants isolation, so `batch` passes this only when asked.
+    master: bool = False
+    on_duplicate: str = "skip"
 
 
 class BatchRunner:
@@ -441,7 +467,7 @@ class BatchRunner:
                 )
         except Exception as exc:  # noqa: BLE001 -- one bad row must not end the batch
             log.exception("Unhandled error processing %s", url)
-            record = new_record(url, options.provenance)
+            record = new_record(url, options.provenance, self._settings.identity)
             record.fail("internal_error")
             record.flag(
                 f"This row crashed the pipeline: {exc!r}. The batch carried on; this URL "
@@ -464,28 +490,40 @@ class BatchRunner:
         self.stats.processed += 1
         self._ledger.record_row(record, self.job_id, index)
 
-        failed = record.status is RowStatus.FAILED
+        # Which of the four terminal states this row reached. Decided in one
+        # place so the counts, the files and the retry button cannot disagree
+        # about what happened -- they did, and three inputs produced six rows.
+        outcome = terminal_state(record, self._settings.config)
         self._ledger.set_outcome(
             self.job_id,
             index,
-            FAILED if failed else LISTED,
+            outcome,
             row_key=record.row_key,
             reason=record.failure_reason,
         )
-        if failed:
+        if outcome == REFUSED:
+            self.stats.refused += 1
+            # §4.4. Written down so the NEXT run can say so before it starts,
+            # rather than after four minutes. History, not a blocklist -- see
+            # `preflight.observe`, which records refusals only.
+            preflight.observe(self._settings, record.source_url, record.failure_reason or "")
+        elif outcome == FAILED:
             self.stats.failed += 1
+        elif outcome == NEEDS_HUMAN:
+            self.stats.needs_review += 1
 
         listings.add(index, record)
 
         # image_tier on the row event, per section 7: Rule 1's direct-vs-hosted
         # ratio should be watchable while it happens, not only in the summary.
         self._on_event(
-            "row_failed" if failed else "row_done",
+            "row_failed" if outcome in (REFUSED, FAILED) else "row_done",
             index=index,
             url=record.source_url,
             row_key=record.row_key,
             title=record.title.value or "",
             status=record.status.value,
+            outcome=outcome,
             image_tier=record.image.method.value,
             reason=record.failure_reason or record.image.reason,
             notes=len(record.notes),
@@ -506,6 +544,27 @@ class BatchRunner:
         if self._on_row is not None:
             self._on_row(self.stats)
 
+    def _add_to_master(self) -> None:
+        """Never fails the job. The sheet is a convenience built from files that
+        are already safely written; a locked master.csv must not cost an
+        operator the run that produced it."""
+        from .output.master import SheetLocked
+
+        try:
+            self.stats.master = add_to_master(
+                self._ledger,
+                self.job_id,
+                self._settings,
+                self._options.image_mode,
+                self._options.on_duplicate,
+            )
+        except SheetLocked as exc:
+            self.stats.master_error = str(exc)
+            log.warning("master.csv not updated: %s", exc)
+        except Exception as exc:  # noqa: BLE001 -- the job itself is finished and valid
+            self.stats.master_error = f"master.csv could not be updated: {exc}"
+            log.exception("master.csv could not be updated for %s", self.job_id)
+
     def _finalise(self, plan: JobPlan) -> None:
         """Account for everything, then render the three projection files."""
         # A stop leaves URLs that were never begun. From the operator's side
@@ -524,6 +583,12 @@ class BatchRunner:
         self.stats.needs_review = rendered["review"]
         self.stats.failed_written = rendered["failed"]
 
+        # The sheet, on completion only. A cancelled job's rows are real and
+        # downloadable from the job itself; folding half of them into the
+        # working sheet would leave an operator unable to tell which half.
+        if self._options.master and state == "done":
+            self._add_to_master()
+
         write_job_json(self.paths, self.job_id, self._settings_snapshot())
         update_job_json(
             self.paths,
@@ -534,4 +599,17 @@ class BatchRunner:
             failed=self.stats.failed_written,
             pages_rendered=self.stats.pages_rendered,
             host_calls=self.stats.host_calls,
+            # So the Complete screen can say "also added 24 rows to your sheet"
+            # without the operator going to look. Absent when master was off.
+            master=(
+                {
+                    "added": self.stats.master.added,
+                    "replaced": self.stats.master.replaced,
+                    "skipped": self.stats.master.skipped,
+                    "total": self.stats.master.total,
+                    "error": self.stats.master_error,
+                }
+                if self.stats.master is not None
+                else ({"error": self.stats.master_error} if self.stats.master_error else None)
+            ),
         )

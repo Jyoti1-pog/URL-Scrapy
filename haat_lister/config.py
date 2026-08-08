@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .models import ImageMode, PriceStrategy
+from .utils.canonical import DEFAULT_RULES, CanonicalRule, Identity
 
 PLACEHOLDER_CONTACT_MARKERS = ("example.com", "yourdomain.com", "you@")
 
@@ -42,6 +43,47 @@ class FetchConfig(_Section):
     max_redirects: int = 5
     max_html_bytes: int = 5_000_000
 
+    # --- the fetch ladder (v4 §2.2) ------------------------------------
+    #
+    # Each rung gets its own short budget rather than the whole `timeout_s`.
+    # Measured, not guessed: a host that black-holes HTTP/1.1 holds the
+    # connection for the full timeout, so three rungs at 20s each turn a
+    # 0.7-second failure into a 60-second one on exactly the sites the ladder
+    # was added to help.
+    rung_timeout_s: float = 8.0
+    rung_backoff_s: float = 0.75
+    ladder_enabled: bool = True
+
+    # --- the per-URL budget (v5 §5) --------------------------------------
+    #
+    # ONE clock for everything a row does: every rung, the browser, and every
+    # retry. Not a sum of the limits above -- a deadline. Without it a single
+    # URL could take the better part of a minute while every individual limit
+    # was being respected, because the limits nest and nothing held the total.
+    url_timeout_s: float = 20.0
+
+    # Consecutive whole-ladder failures before later URLs on the same host fail
+    # immediately. A run-scoped count, cleared by any success: the host is not
+    # on a blacklist, it is having a bad afternoon. §5 names 5; the ladder shipped
+    # with 3, and 5 is the more forgiving of the two on a host that is merely
+    # flaky rather than refusing.
+    refusals_before_fast_fail: int = 5
+
+    # Retries per URL, on top of the ladder and only for retryable reasons.
+    # Small because the ladder is already three attempts: this is for the
+    # `Retry-After` case, not for grinding.
+    max_url_retries: int = 2
+    retry_base_s: float = 1.0
+
+    # The header set, in config because "what a browser sends" changes and
+    # should not need a release. See fetch/ladder.py for why these are honesty
+    # rather than disguise.
+    accept_header: str = (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    )
+    accept_language: str = "en-IN,en;q=0.9"
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+
     # SSRF escape hatch. An allowlist of HOSTS, not a boolean, so switching the
     # guard off wholesale is not the easy path. Config-file only -- the API
     # never accepts it from a request body.
@@ -61,6 +103,29 @@ class RenderConfig(_Section):
     block_resource_types: list[str] = Field(default_factory=lambda: ["image", "media", "font"])
     viewport_width: int = 1280
     viewport_height: int = 2000
+
+    # Scroll once before reading the DOM. Most lazy-load galleries are wired to
+    # IntersectionObserver, so a page that is never scrolled shows exactly one
+    # photo no matter how long it is left to settle -- `networkidle` is
+    # satisfied because nothing was ever asked for.
+    scroll_before_parse: bool = True
+
+    # Wait for one of these to appear before reading the DOM, rather than for
+    # the network to fall quiet. Best-effort: a page with no gallery is a fact
+    # about the page, not a failure, so a miss costs `gallery_wait_ms` and the
+    # render proceeds regardless.
+    gallery_selectors: list[str] = Field(
+        default_factory=lambda: [
+            "#altImages img",
+            "[data-gallery] img",
+            ".product__media img",
+            ".product-gallery img",
+            ".woocommerce-product-gallery img",
+            "[class*='gallery'] img",
+            "main img[srcset]",
+        ]
+    )
+    gallery_wait_ms: int = 3000
 
     @field_validator("retry_when_missing")
     @classmethod
@@ -116,8 +181,17 @@ class CurrencyConfig(_Section):
 
 class ValidatorConfig(_Section):
     min_bytes: int = 10_240
+    # The listable standard. haat is a premium marketplace and this is the size
+    # a photo should be.
     min_width: int = 800
     min_height: int = 800
+    # The floor below which the answer is still "no photo". Between the two, a
+    # photo ships with `image_method=*_low_res` and a flag carrying its actual
+    # dimensions -- because "reject everything, ship nothing" is the wrong
+    # failure mode for a standard. An operator with a 679x679 photo and a flag
+    # can decide; an operator with nothing cannot.
+    hard_min_width: int = 400
+    hard_min_height: int = 400
     max_redirect_hops: int = 5
     header_probe_bytes: int = 65_536
     max_probe_bytes: int = 5_242_880
@@ -216,8 +290,76 @@ class LlmConfig(_Section):
     max_calls_per_run: int = 0
 
 
+class CanonicalRuleConfig(_Section):
+    """One per-domain canonical rule, from config.yaml.
+
+    Mirrors `utils.canonical.CanonicalRule`. A rule whose `name` matches a
+    built-in replaces it outright rather than merging field by field: a partial
+    override would leave an operator reading their own config and still not
+    knowing what the effective rule is.
+    """
+
+    name: str
+    host_pattern: str
+    path_pattern: str = ""
+    path_template: str = ""
+    group_case: str = ""
+    keep_query: list[str] | None = None
+    drop_query: list[str] = Field(default_factory=list)
+    why: str = ""
+
+    def to_rule(self) -> CanonicalRule:
+        return CanonicalRule(
+            name=self.name,
+            host_pattern=self.host_pattern,
+            path_pattern=self.path_pattern,
+            path_template=self.path_template,
+            group_case=self.group_case,
+            keep_query=tuple(self.keep_query) if self.keep_query is not None else None,
+            drop_query=tuple(self.drop_query),
+            why=self.why,
+        )
+
+
+class CanonicalConfig(_Section):
+    """Which links count as the same product.
+
+    Empty by default: the built-in rules for Amazon, Flipkart and Etsy cover the
+    marketplaces this tool is pointed at most, and an operator only needs this
+    section to add their own.
+    """
+
+    rules: list[CanonicalRuleConfig] = Field(default_factory=list)
+    # Off, and it stays off unless asked for on the command line. A size that
+    # costs a different amount is a different haat listing, so collapsing
+    # variants is a claim about the catalogue that only the seller can make.
+    merge_variants: bool = False
+
+    def resolved(self) -> tuple[CanonicalRule, ...]:
+        overrides = {r.name: r.to_rule() for r in self.rules}
+        merged = [overrides.pop(rule.name, rule) for rule in DEFAULT_RULES]
+        # Anything not overriding a built-in is appended, in config order.
+        return tuple(merged + [overrides[r.name] for r in self.rules if r.name in overrides])
+
+
 class PathsConfig(_Section):
     taxonomy: str = "taxonomy.yaml"
+    # The accumulating sheet, relative to runs_dir. What happens when a URL is
+    # already in it: skip (report and move on), replace (update in place,
+    # keeping its position), append (allow the duplicate).
+    master_csv: str = "master.csv"
+    master_on_duplicate: str = "skip"
+
+    @field_validator("master_on_duplicate")
+    @classmethod
+    def _known_duplicate_policy(cls, value: str) -> str:
+        from .output.master import ON_DUPLICATE
+
+        if value not in ON_DUPLICATE:
+            raise ValueError(
+                f"paths.master_on_duplicate must be one of {list(ON_DUPLICATE)}, not {value!r}"
+            )
+        return value
     ledger: str = "store/ledger.db"
     # Every batch run gets runs/<job_id>/ with all four files and its images.
     runs_dir: str = "runs"
@@ -243,6 +385,7 @@ class AppConfig(_Section):
     hs_codes: HsCodesConfig
     policy: PolicyConfig
     llm: LlmConfig
+    canonical: CanonicalConfig = Field(default_factory=CanonicalConfig)
     paths: PathsConfig
 
     @classmethod
@@ -279,6 +422,12 @@ class Secrets(BaseSettings):
     imgbb_api_key: SecretStr | None = None
     imgur_client_id: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
+
+    # Optional Google Sheets export. Both halves are required for it to work,
+    # and with neither set the feature is entirely absent -- no flag, no
+    # warning, no nag.
+    google_credentials_file: str = ""
+    google_sheet_id: str = ""
 
     def has_host_credentials(self, host: str) -> bool:
         match host:
@@ -426,6 +575,21 @@ class Settings(BaseModel):
     def user_agent(self) -> str:
         return self.config.fetch.user_agent_template.format(
             contact=self.secrets.haat_contact or "UNSET"
+        )
+
+    @property
+    def identity(self) -> Identity:
+        """What counts as the same product: the built-in per-domain rules with
+        config.yaml's on top, plus the variant decision.
+
+        Resolved here rather than at each call site so that every place which
+        computes a URL identity -- the planner, the record, the ledger -- is
+        looking at one table. Two of them disagreeing does not raise anything;
+        it just quietly stops deduping, which is the worst kind of bug to have.
+        """
+        return Identity(
+            rules=self.config.canonical.resolved(),
+            merge_variants=self.config.canonical.merge_variants,
         )
 
 

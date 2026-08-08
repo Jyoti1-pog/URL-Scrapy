@@ -63,6 +63,17 @@ async def download_candidate(
     }
 
     buffer = bytearray()
+    if url.startswith("data:"):
+        # v5 §4.2. The photo came out of the operator's own saved page, so the
+        # bytes are already here and the source host is never contacted. That
+        # is the point of the route: it works on a site that has refused us.
+        from .validator import _decode_data_uri
+
+        blob = _decode_data_uri(url)
+        if not blob or len(blob) > limit:
+            return None
+        return _write(bytearray(blob), dest_dir, index, url)
+
     try:
         async with client.stream("GET", url, headers=headers, follow_redirects=True) as response:
             if response.status_code >= 400:
@@ -81,12 +92,22 @@ async def download_candidate(
         log.debug("Download %s failed: %s", url, exc)
         return None
 
+    return _write(buffer, dest_dir, index, url)
+
+
+def _write(buffer: bytearray, dest_dir: Path, index: int, url: str) -> DownloadedFile | None:
+    """Sniff, write, verify, and delete anything that turns out to be junk.
+
+    Shared by the streamed path and the inlined one so that bytes an operator
+    supplied get exactly the same scrutiny as bytes off a CDN. Having given us
+    the file is not evidence that it is a decodable photograph.
+    """
     if not buffer:
         return None
 
     fmt = sniff_format(bytes(buffer[:16]))
     if fmt is None:
-        log.debug("Download %s: not an image (magic bytes)", url)
+        log.debug("Download %s: not an image (magic bytes)", url[:80])
         return None
 
     path = dest_dir / f"{index:02d}{_EXTENSIONS.get(fmt, '.img')}"
@@ -96,7 +117,7 @@ async def download_candidate(
         with Image.open(path) as image:
             image.verify()
     except (UnidentifiedImageError, OSError, ValueError) as exc:
-        log.debug("Download %s: corrupt image, discarding (%s)", url, exc)
+        log.debug("Download %s: corrupt image, discarding (%s)", url[:80], exc)
         path.unlink(missing_ok=True)
         return None
 

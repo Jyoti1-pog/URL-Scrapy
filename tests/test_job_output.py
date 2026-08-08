@@ -24,9 +24,10 @@ from haat_lister.batch import BatchOptions, BatchRunner, DomainLimiter, StopSign
 from haat_lister.config import Settings
 from haat_lister.jobs import (
     DUPLICATE,
-    FAILED,
     INVALID,
-    LISTED,
+    NEEDS_HUMAN,
+    TERMINAL,
+    WRITTEN,
     UnaccountedUrls,
     assert_accounted,
     is_job_id,
@@ -100,7 +101,11 @@ class FakeProcessor:
 
         record = new_record(url, provenance)
         if url in self._fail_for:
-            record.fail("http_503")
+            # What a real 503 produces after v5 §2.1: the enum member, with
+            # the raw status in its own column. A fake that emits a transport
+            # word tests a vocabulary the pipeline no longer speaks.
+            record.fail("http_error_5xx")
+            record.http_status = 503
             return record
         record.title = FieldValue.found(
             f"Product {url.rsplit('/', 1)[-1]}", FieldSource.JSONLD, Confidence.HIGH
@@ -220,7 +225,9 @@ def test_every_input_url_accounted_for(job_settings: Settings) -> None:
         assert ledger.unaccounted(stats.job_id) == []
         assert_accounted(ledger, stats.job_id)
 
-    assert counts[LISTED] == 10
+    # `listed` split into `written` and `needs_human` (v5 §1.1). Both are in
+    # listings.csv; the difference is whether review.csv points at them.
+    assert counts.get(WRITTEN, 0) + counts.get(NEEDS_HUMAN, 0) == 10
     assert counts[DUPLICATE] == 1
     assert counts[INVALID] == 2
     assert sum(counts.values()) == 13
@@ -245,7 +252,10 @@ def test_every_input_url_accounted_for_after_a_cancel(job_settings: Settings) ->
         assert ledger.unaccounted(stats.job_id) == []
         counts = assert_accounted(ledger, stats.job_id)
 
-    assert counts[LISTED] + counts[FAILED] == 40
+    # The four terminal states, summing to every URL that was attempted.
+    # `not_started` rows from a cancel land in `failed`, which is where an
+    # operator looks for work to re-run.
+    assert sum(counts.get(state, 0) for state in TERMINAL) == 40
 
     paths = job_paths(job_settings, stats.job_id)
     listed = len(read_csv(paths.listings))
@@ -272,7 +282,9 @@ def test_failed_csv_is_re_runnable(job_settings: Settings) -> None:
     paths = job_paths(job_settings, stats.job_id)
     failed = read_csv(paths.failed)
     assert [r["source_url"] for r in failed] == [lines[2]]
-    assert failed[0]["reason"] == "http_503"
+    assert failed[0]["reason"] == "http_error_5xx"
+    assert failed[0]["class"] == "failed"
+    assert failed[0]["http_status"] == "503"
     assert failed[0]["http_status"] == "503"
 
     replan = plan_urls([r["source_url"] for r in failed])
@@ -301,9 +313,11 @@ def test_duplicate_urls_collapsed_and_reported() -> None:
     assert len(plan.accepted) == 2
     assert plan.duplicates == 2
     assert "2 duplicate" in plan.summary()
+    # "link 1", not "line 1". Once a paste can put twelve comma-separated links
+    # on one line, a line number stops identifying which one is meant.
     assert [u.note for u in plan.urls if u.status == DUPLICATE] == [
-        "same product as line 1",
-        "same product as line 1",
+        "same product as link 1",
+        "same product as link 1",
     ]
 
 

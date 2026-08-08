@@ -19,6 +19,7 @@ import { useJobEvents } from "../hooks/useJobEvents";
 import { FillGrid } from "../components/FillGrid";
 import { RowStream, TierCounts, mergeRows, tierSummary, type LiveRow } from "../components/RowStream";
 import { Downloads, RunFacts } from "../components/Downloads";
+import { need } from "../lib/plural";
 
 export function JobScreen() {
   const { jobId = "" } = useParams();
@@ -85,7 +86,12 @@ export function JobScreen() {
 
         <div className="job-summary">
           <Stat n={written} label="written" tone="depth-high" />
-          <Stat n={needsHuman} label="need a human" tone="is-review" />
+          <Stat n={needsHuman} label={`${need(needsHuman)} a human`} tone="is-review" />
+          {/* Refused is not failed. The site declined and the tool was correct
+              to stop, so it gets its own number in brass rather than madder --
+              and it is excluded from the retry, because retrying a refusal
+              produces the same refusal forever. */}
+          <Stat n={job.refused} label="refused" tone={job.refused ? "is-review" : "depth-none"} />
           <Stat n={failed} label="failed" tone={failed ? "is-failed" : "depth-none"} />
           <div className="job-actions">
             {running && (

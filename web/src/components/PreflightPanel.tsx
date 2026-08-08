@@ -7,6 +7,7 @@
   per-host time floor -- and both change whether they want to press the button.
 */
 
+import { Link } from "react-router-dom";
 import type { Preflight } from "../api/client";
 
 interface Props {
@@ -56,6 +57,29 @@ export function PreflightPanel({ preflight, estimate, busy, onBack, onStart }: P
             detail="Those shops ask crawlers to stay out of these pages. They will appear in failed.csv with the reason, and nothing will be fetched from them."
           />
         )}
+        {preflight.observed.length > 0 && (
+          /* §9. A warning that names a problem and not the way round it is
+             half a message. The route that works on a refusing host is the
+             operator's own export or a saved page, so the offer is here, next
+             to the news, rather than three screens away. */
+          <p className="help">
+            Hosts that refuse this tool can still be listed from a file you already have:{" "}
+            <Link to="/import">import a seller export or a saved page</Link>. Nothing here
+            stops this run -- it will ask them again.
+          </p>
+        )}
+        {preflight.observed.map((host) => (
+          /* §4.4. Said before the run rather than four minutes into it. Toned
+             as a note rather than a failure on purpose: this is what happened
+             last time, and the run is going to ask again. */
+          <Fact
+            key={host.host}
+            n={host.urls}
+            tone="is-review"
+            label={`on ${host.host}, which answered ${host.reason} last time`}
+            detail={host.detail}
+          />
+        ))}
         {!preflight.robots_checked && (
           <Fact
             n={0}

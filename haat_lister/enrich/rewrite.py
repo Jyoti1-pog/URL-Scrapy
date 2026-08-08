@@ -205,8 +205,18 @@ def build_prompt(record: ProductRecord, settings: Settings, tasks: list[str]) ->
         "SOURCE PRODUCT",
         f"Title: {record.title.value or '(none)'}",
         f"Description: {record.description.value or '(none)'}",
-        "",
     ]
+
+    # Attributes the source stuffed into its own title. Offered rather than
+    # discarded: "70H Playtime, BT v5.3, 13mm Drivers" is real product
+    # information that happened to be living in the wrong field. Still facts
+    # from the page, so the "keep every concrete fact, invent nothing" rule
+    # covers them unchanged.
+    if record.title_attributes:
+        parts.append(
+            "Stated in the source title: " + ", ".join(record.title_attributes)
+        )
+    parts.append("")
 
     if "description" in tasks:
         parts += [

@@ -23,6 +23,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError, type Cell, type RowTable } from "../api/client";
 import { useConfig } from "../hooks/useConfig";
+import { rowsNeed } from "../lib/plural";
 
 // Wide columns first: an operator scanning for what to fix reads the title.
 const PRIORITY = [
@@ -213,8 +214,9 @@ export function Review() {
       <div className="review-head">
         <div>
           <h1 className="screen-title">
-            {page.total} row{page.total === 1 ? "" : "s"}
-            {flaggedOnly ? " need a human" : ""}
+            {flaggedOnly
+              ? `${rowsNeed(page.total)} a human`
+              : `${page.total} row${page.total === 1 ? "" : "s"}`}
           </h1>
           <p className="lede">
             <Link to={`/jobs/${jobId}`}>back to {jobId}</Link> · arrows move · enter edits ·

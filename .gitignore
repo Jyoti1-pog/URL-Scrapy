@@ -21,6 +21,11 @@ __pycache__/
 /listings.csv
 /review.csv
 /image_manifest.csv
+# Observed refusals (v5 §4.4). Written by the tool, about the operator's own
+# hosts, on their own network -- history rather than configuration, and it goes
+# stale in thirty days. `profiles/` is deliberately NOT here: a saved column
+# mapping describes the operator's catalogue and is worth versioning.
+/domains.yaml
 *.tmp
 *.log
 

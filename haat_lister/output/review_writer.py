@@ -25,6 +25,9 @@ from ..utils.atomic import atomic_text_writer
 REVIEW_COLUMNS: tuple[str, ...] = (
     "row_key",
     "source_url",
+    # Only populated when cleaning shortened it, so a bad cut is visible here
+    # rather than only on the page.
+    "title_original",
     "provenance",
     "status",
     "policy_flags",
@@ -36,6 +39,10 @@ REVIEW_COLUMNS: tuple[str, ...] = (
     "suggested_hs_code",
     "gi_mention_found",
     "image_method",
+    # The closed-enum word (§4.6) beside the diagnostic detail. Two columns
+    # because an operator sorts and filters on the first and reads the second
+    # only when the first is not enough.
+    "image_problem",
     "image_reason",
     "local_image_path",
     "fetch_stage",
@@ -43,12 +50,31 @@ REVIEW_COLUMNS: tuple[str, ...] = (
 )
 
 
+def extracted_anything(record: ProductRecord) -> bool:
+    """Did this row ever produce content?
+
+    A URL that was refused or never answered has an empty record. Everything
+    downstream -- missing-field counts, review rows, the flag badge -- is a
+    statement about a record that does not exist, and rendering it produced
+    `⚑10` on three rows that had nothing to flag.
+    """
+    return any(field.is_present for field in record.field_values().values())
+
+
 def missing_required(record: ProductRecord, cfg: AppConfig) -> list[str]:
     """Fields haat's own form marks with an asterisk that we could not fill.
 
     Blank is a legitimate CSV value, but a blank here stops the seller
     publishing, so these are the rows an operator must work through.
+
+    EMPTY when the row extracted nothing. A record with no content has no
+    field-level problems -- it has one reason, and that reason is the only true
+    thing that can be said about it. Counting ten missing fields on a page that
+    never loaded tells an operator to go and fill in a title for something they
+    cannot see.
     """
+    if not extracted_anything(record):
+        return []
     fields = record.field_values()
     return [
         name
@@ -67,7 +93,20 @@ def low_confidence_fields(record: ProductRecord) -> list[str]:
 
 
 def needs_review(record: ProductRecord, cfg: AppConfig) -> bool:
-    """One row per listing, but only for rows that actually need attention."""
+    """Rows that reached listings.csv and still want a decision.
+
+    A FAILED row is never one of them, and that is the fix for the six-rows-from-
+    three-inputs bug: this used to return True for `status is not OK`, so every
+    refused and every failed URL was written into review.csv as well as
+    failed.csv, and then counted in both.
+
+    review.csv is a POINTER INTO listings.csv, not a second list of problems.
+    If a row is not in listings.csv it cannot be pointed at, and there is
+    nothing on it for a human to decide -- the reason on the failed row is the
+    whole story.
+    """
+    if record.status is RowStatus.FAILED or not extracted_anything(record):
+        return False
     return bool(
         record.status is not RowStatus.OK
         or record.policy_flags
@@ -83,6 +122,7 @@ def review_row(record: ProductRecord, cfg: AppConfig) -> list[str]:
     return [
         record.row_key,
         record.source_url,
+        record.title_original if record.title_original != (record.title.value or "") else "",
         record.provenance.value,
         record.status.value,
         " | ".join(record.policy_flags),
@@ -94,6 +134,7 @@ def review_row(record: ProductRecord, cfg: AppConfig) -> list[str]:
         str(hs.value) if hs.is_present else "",
         record.gi_mention_found or "",
         record.image.method.value,
+        record.image.none_reason.value if record.image.none_reason else "",
         record.image.reason,
         " | ".join(f.local_path for f in record.image.files),
         record.fetch_stage.value,

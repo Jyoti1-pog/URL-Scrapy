@@ -22,11 +22,13 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ...config import Settings
+from ...images.reasons import explain
 from ...jobs import (
     DUPLICATE,
     FAILED,
+    IN_LISTINGS,
     INVALID,
-    LISTED,
+    REFUSED,
     JobPlan,
     is_job_id,
     job_paths,
@@ -38,20 +40,27 @@ from ...output.csv_writer import HAAT_COLUMNS, cell_depths
 from ...output.review_writer import missing_required, needs_review
 from ...store.ledger import Ledger
 from ...utils.logging import get_logger
-from ...utils.urls import origin_of
+from ...utils.urls import host_of, origin_of
 from ..events import parse_last_event_id
 from ..runner import QueuedJob
 from ..schemas import (
     MAX_BYTES,
     MAX_URLS,
+    PREVIEW_LIMIT,
+    UNPARSED_LIMIT,
     ArtifactOut,
     InvalidUrlOut,
     JobCreatedOut,
     JobCreateIn,
     JobOut,
     JobSummaryOut,
+    MasterOut,
+    ObservedHostOut,
+    ParsedLinkOut,
+    ParseOut,
     PreflightOut,
     RowOut,
+    UrlsIn,
 )
 
 log = get_logger(__name__)
@@ -91,10 +100,62 @@ def _check_size(urls: list[str]) -> None:
 
 
 def _invalid_out(plan: JobPlan) -> list[InvalidUrlOut]:
+    # `line` is the position in the paste, not in the output. Once one line can
+    # hold twelve comma-separated links, the output index stops being somewhere
+    # an operator can go and look.
     return [
-        InvalidUrlOut(line=u.index + 1, raw=u.raw[:300], reason=u.note or "not a product link")
+        InvalidUrlOut(line=u.line or u.index + 1, raw=u.raw[:300], reason=u.note or "not a link")
         for u in plan.invalid
     ]
+
+
+# ---------------------------------------------------------------------------
+# Parse -- the live preview
+# ---------------------------------------------------------------------------
+
+
+@router.post("/parse", response_model=ParseOut)
+def parse(body: UrlsIn, request: Request) -> ParseOut:
+    """Show the operator what we made of their paste, before anything runs.
+
+    Deliberately its own route rather than a lighter preflight: this is called
+    while someone is typing and must never touch the network. Preflight fetches
+    robots.txt, which is right for a decision and wrong for a keystroke.
+
+    It is also why the browser no longer counts links itself. A comma-separated
+    paste of twelve read as one malformed line was the visible half of Defect 3,
+    and the fix is not a better client-side parser -- it is not having a second
+    parser at all.
+    """
+    _check_size(body.urls)
+    settings = _state(request).settings
+    plan = plan_urls(body.urls, settings.identity)
+
+    links = [
+        ParsedLinkOut(
+            line=entry.line,
+            original=entry.raw[:300],
+            canonical=entry.canonical,
+            host=origin_of(entry.canonical).removeprefix("https://").removeprefix("http://"),
+            status=entry.status,
+            assumed_scheme=entry.assumed_scheme,
+            note=entry.note,
+        )
+        for entry in plan.urls
+        if entry.status != INVALID
+    ]
+
+    return ParseOut(
+        pasted=len(plan.urls),
+        unique=len(plan.accepted),
+        duplicates=plan.duplicates,
+        invalid=len(plan.invalid),
+        links=links[:PREVIEW_LIMIT],
+        unparsed=_invalid_out(plan)[:UNPARSED_LIMIT],
+        domains=dict(plan.domains.most_common()),
+        truncated=len(links) > PREVIEW_LIMIT,
+        summary=plan.summary(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +174,7 @@ async def preflight(body: JobCreateIn, request: Request) -> PreflightOut:
     """
     _check_size(body.urls)
     settings = _state(request).settings
-    plan = plan_urls(body.urls)
+    plan = plan_urls(body.urls, settings.identity)
 
     disallowed: list[str] = []
     blocked: list[str] = []
@@ -145,10 +206,35 @@ async def preflight(body: JobCreateIn, request: Request) -> PreflightOut:
                 if not seen[origin]:
                     disallowed.append(entry.raw)
 
+    # v5 §4.4. What these hosts did last time. Read from `domains.yaml`, which
+    # previous runs wrote; it is history and it never prevents anything, so it
+    # is gathered after robots rather than instead of it.
+    from ... import preflight as preflight_core
+
+    history = preflight_core.load_history(settings)
+    counts: dict[str, int] = {}
+    for entry in plan.accepted:
+        counts[host_of(entry.canonical)] = counts.get(host_of(entry.canonical), 0) + 1
+    observed = [
+        ObservedHostOut(
+            host=host,
+            urls=count,
+            reason=previously.reason,
+            detail=(
+                f"{host} answered {previously.reason} {previously.count}x, most recently "
+                f"{previously.last_seen[:10]}. It may well have changed its mind -- "
+                "this run will ask again."
+            ),
+        )
+        for host, count in sorted(counts.items())
+        if (previously := history.get(host)) is not None and previously.refused
+    ]
+
     low, high = plan.estimate_seconds(
         body.settings.concurrency, settings.config.fetch.per_domain_delay_s
     )
     return PreflightOut(
+        observed=observed,
         pasted=plan.pasted,
         unique=len(plan.accepted),
         duplicates=plan.duplicates,
@@ -171,7 +257,8 @@ async def preflight(body: JobCreateIn, request: Request) -> PreflightOut:
 @router.post("", response_model=JobCreatedOut, status_code=202)
 async def create(body: JobCreateIn, request: Request) -> JobCreatedOut:
     _check_size(body.urls)
-    runner = _state(request).runner
+    state = _state(request)
+    runner, settings = state.runner, state.settings
 
     try:
         provenance = Provenance(body.settings.provenance)
@@ -180,7 +267,7 @@ async def create(body: JobCreateIn, request: Request) -> JobCreatedOut:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    plan = plan_urls(body.urls)
+    plan = plan_urls(body.urls, settings.identity)
     if not plan.accepted:
         raise HTTPException(
             status_code=422,
@@ -198,6 +285,11 @@ async def create(body: JobCreateIn, request: Request) -> JobCreatedOut:
         concurrency=body.settings.concurrency,
         seller_note=body.settings.seller_note,
         description_mode=effective_description_mode(description_mode, provenance),
+        # On, for the console. The web operator's mental model is one sheet
+        # that fills up -- ten jobs in a week should not be ten files to merge
+        # by hand. The CLI defaults the other way; see BatchOptions.
+        master=True,
+        on_duplicate=settings.config.paths.master_on_duplicate,
     )
     queued_behind = 1 if runner.current else 0
     runner.submit(
@@ -282,6 +374,16 @@ def read(job_id: str, request: Request) -> JobOut:
                     status=record.status.value if record else "",
                     image_tier=record.image.method.value if record else "",
                     reason=row["reason"] or "",
+                    image_problem=(
+                        record.image.none_reason.value
+                        if record and record.image.none_reason
+                        else ""
+                    ),
+                    image_explanation=(
+                        explain(record.image.none_reason)
+                        if record and record.image.none_reason
+                        else ""
+                    ),
                     needs_human=wanted,
                     missing=missing_required(record, cfg) if record else [],
                     cells=cell_depths(record) if record else "",
@@ -298,6 +400,7 @@ def read(job_id: str, request: Request) -> JobOut:
         )
         for name, path in (
             ("listings", paths.listings),
+            ("listings_with_images", paths.listings_with_images),
             ("review", paths.review),
             ("manifest", paths.manifest),
             ("failed", paths.failed),
@@ -315,8 +418,12 @@ def read(job_id: str, request: Request) -> JobOut:
         settings=json.loads(job["settings"]),
         counts=counts,
         total=total,
-        processed=counts.get(LISTED, 0) + counts.get(FAILED, 0),
-        written=counts.get(LISTED, 0),
+        processed=sum(counts.get(state, 0) for state in (*IN_LISTINGS, REFUSED, FAILED)),
+        # `written` means "reached listings.csv", which includes needs_human --
+        # that row IS written, and review.csv points into it rather than
+        # replacing it.
+        written=sum(counts.get(state, 0) for state in IN_LISTINGS),
+        refused=counts.get(REFUSED, 0),
         failed=counts.get(FAILED, 0),
         needs_human=needs_human,
         running=runner.is_running(job_id),
@@ -325,6 +432,7 @@ def read(job_id: str, request: Request) -> JobOut:
         artifacts=artifacts,
         columns=list(HAAT_COLUMNS),
         host_calls=int(run.get("host_calls", 0) or 0),
+        master=MasterOut(**run["master"]) if isinstance(run.get("master"), dict) else None,
         pages_rendered=int(run.get("pages_rendered", 0) or 0),
         duration_s=_duration(job["created_at"], job["finished_at"]),
     )
@@ -441,6 +549,7 @@ def artifact_path(settings: Settings, job_id: str, name: str) -> Path:
     paths = job_paths(settings, job_id)
     allowed = {
         "listings": paths.listings,
+        "listings_with_images": paths.listings_with_images,
         "review": paths.review,
         "manifest": paths.manifest,
         "failed": paths.failed,

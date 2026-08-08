@@ -39,6 +39,10 @@ router = APIRouter(prefix="/api/jobs", tags=["downloads"])
 # else is a 404 before a path is ever built.
 ARTIFACTS: dict[str, str] = {
     "listings": "listings.csv",
+    # The same rows plus every photo link. A separate artifact rather than an
+    # option on the first, because both are produced every run and an operator
+    # needs to be able to grab either without thinking about a flag.
+    "listings_with_images": "listings_with_images.csv",
     "review": "review.csv",
     "manifest": "image_manifest.csv",
     "failed": "failed.csv",
@@ -48,7 +52,7 @@ ARTIFACTS: dict[str, str] = {
 # review.csv, the manifest and failed.csv are rebuilt from the ledger before
 # being served. listings.csv is not: it is written in input order as the job
 # runs, and rewriting it would throw away the ordering guarantee.
-REGENERATED = {"review", "manifest", "failed"}
+REGENERATED = {"review", "manifest", "failed", "listings_with_images"}
 
 
 def _settings(request: Request) -> Settings:

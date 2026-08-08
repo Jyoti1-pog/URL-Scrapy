@@ -109,7 +109,45 @@ CREATE TABLE IF NOT EXISTS bad_hotlink_hosts (
     failures    INTEGER NOT NULL DEFAULT 0,
     last_seen   TEXT NOT NULL
 );
+
+-- What "Find photos" learned about a URL, so a real job over the same links
+-- reuses the work instead of fetching every shop twice. Keyed on the canonical
+-- URL, which is the same identity the planner and the sheet use.
+--
+-- Only successes are stored. A shop that was down for ten minutes must not be
+-- written off for a week, and the cheapest way to be sure of that is never to
+-- remember a "no".
+CREATE TABLE IF NOT EXISTS find_cache (
+    canonical_url TEXT PRIMARY KEY,
+    payload       TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+-- Which fetch rung a host answers on. A catalogue is almost always one shop, so
+-- a host that needed HTTP/1.1 for its first URL needs it for the other 199 --
+-- and paying the HTTP/2 failure 200 times is the whole cost of having a ladder.
+--
+-- A stale entry can never break a working site: starting at a later rung only
+-- SKIPS rungs, and if that one fails the climb continues exactly as it would
+-- have. So the risk is bounded to wasted time, and the entry ages out anyway.
+CREATE TABLE IF NOT EXISTS fetch_profiles (
+    host       TEXT PRIMARY KEY,
+    rung       TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
+
+
+# A rung a host answered on is stable -- a site that needs HTTP/1.1 today needs
+# it next month -- but not forever. Thirty days means a shop that fixes its
+# HTTP/2 is back on the fast path within a billing cycle rather than never.
+FETCH_PROFILE_TTL_DAYS = 30
+
+
+# How long a cached find stays useful. A week is long enough to make "find, then
+# run" one workflow rather than two, and short enough that a shop's new photos
+# are not invisible for a month.
+FIND_CACHE_TTL_DAYS = 7
 
 
 LEGACY_JOB = "j_legacy00"
@@ -464,6 +502,75 @@ class Ledger:
         return int(row["n"])
 
     # -- predicate 9 -------------------------------------------------------
+
+    # -- find cache -------------------------------------------------------
+
+    def remember_find(self, canonical_url: str, payload: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO find_cache (canonical_url, payload, created_at) "
+            "VALUES (?, ?, ?)",
+            (canonical_url, payload, datetime.now(UTC).isoformat()),
+        )
+        self._conn.commit()
+
+    def find_cached(self, canonical_url: str, ttl_days: int = FIND_CACHE_TTL_DAYS) -> str | None:
+        """The stored answer, or None when there is none or it has aged out."""
+        row = self._conn.execute(
+            "SELECT payload, created_at FROM find_cache WHERE canonical_url = ?",
+            (canonical_url,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            age = datetime.now(UTC) - datetime.fromisoformat(row["created_at"])
+        except (TypeError, ValueError):
+            return None
+        if age > timedelta(days=ttl_days):
+            return None
+        return str(row["payload"])
+
+    def clear_find_cache(self) -> int:
+        cursor = self._conn.execute("DELETE FROM find_cache")
+        self._conn.commit()
+        return int(cursor.rowcount or 0)
+
+    # -- fetch profiles ---------------------------------------------------
+
+    def remember_rung(self, host: str, rung: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO fetch_profiles (host, rung, updated_at) VALUES (?, ?, ?)",
+            (host, rung, datetime.now(UTC).isoformat()),
+        )
+        self._conn.commit()
+
+    def rung_for(self, host: str, ttl_days: int = FETCH_PROFILE_TTL_DAYS) -> str | None:
+        row = self._conn.execute(
+            "SELECT rung, updated_at FROM fetch_profiles WHERE host = ?", (host,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            age = datetime.now(UTC) - datetime.fromisoformat(row["updated_at"])
+        except (TypeError, ValueError):
+            return None
+        return None if age > timedelta(days=ttl_days) else str(row["rung"])
+
+    def all_rungs(self) -> list[tuple[str, str, str]]:
+        return [
+            (r["host"], r["rung"], r["updated_at"])
+            for r in self._conn.execute(
+                "SELECT host, rung, updated_at FROM fetch_profiles ORDER BY host"
+            ).fetchall()
+        ]
+
+    def forget_rung(self, host: str | None = None) -> int:
+        cursor = (
+            self._conn.execute("DELETE FROM fetch_profiles")
+            if host is None
+            else self._conn.execute("DELETE FROM fetch_profiles WHERE host = ?", (host,))
+        )
+        self._conn.commit()
+        return int(cursor.rowcount or 0)
 
     def is_bad_hotlink_host(self, host: str, threshold: int, ttl_days: int) -> bool:
         row = self._conn.execute(

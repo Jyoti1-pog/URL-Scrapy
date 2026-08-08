@@ -21,7 +21,9 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .images.reasons import NoImageReason
 
 T = TypeVar("T")
 
@@ -95,6 +97,21 @@ class ImageMethod(StrEnum):
     HOSTED = "hosted"   # Tier 2c: re-uploaded. Always names the Tier-1 failure.
     NONE = "none"       # Tier 3: honest failure
 
+    # Below the listable standard but above the unusable floor. Distinct values
+    # rather than a boolean beside DIRECT/LOCAL, so a row that shipped a small
+    # photo can never be mistaken for one that shipped a good one -- in the CSV,
+    # in the summary, or by a later reader of this enum.
+    DIRECT_LOW_RES = "direct_low_res"
+    LOCAL_LOW_RES = "local_low_res"
+
+    @property
+    def has_image(self) -> bool:
+        return self is not ImageMethod.NONE
+
+    @property
+    def is_low_res(self) -> bool:
+        return self in (ImageMethod.DIRECT_LOW_RES, ImageMethod.LOCAL_LOW_RES)
+
 
 class RowStatus(StrEnum):
     OK = "ok"
@@ -107,6 +124,13 @@ class FetchStage(StrEnum):
     RENDERED = "rendered"    # Stage B: Playwright
     FAILED = "failed"        # Stage C
     CACHED = "cached"        # resumed from the ledger
+    # v5 §4.2. A page the operator saved from their own browser. Recorded as
+    # its own stage rather than passed off as `static`, because a row nobody
+    # can re-fetch is a different thing to audit: the bytes came from a human's
+    # session, at a time we did not choose, and that is worth knowing a year on.
+    SAVED_PAGE = "saved_page"
+    # v5 §4.1. Fields came from the operator's own seller panel, not a page.
+    SELLER_EXPORT = "seller_export"
 
 
 class DescriptionMode(StrEnum):
@@ -195,6 +219,9 @@ class ImageFile(BaseModel):
     bytes: int
     width: int
     height: int
+    # Kept, but below the listable standard. Carried per file rather than per
+    # row so the manifest can say which photo is the small one.
+    low_res: bool = False
 
 
 class ImageResult(BaseModel):
@@ -207,8 +234,37 @@ class ImageResult(BaseModel):
 
     url: str = ""
     method: ImageMethod = ImageMethod.NONE
+    # The diagnostic string: which predicates failed, which hosts refused. Long
+    # on purpose, and aimed at whoever is debugging a rising hosted ratio.
     reason: str = ""
+    # The closed-enum answer to "why is there no photo?", set whenever `method`
+    # is NONE and never otherwise. This is the one an operator and the UI act
+    # on; `reason` above is the evidence behind it. Two fields rather than one
+    # because "direct_failed:below_min_dimensions,too_small -> nothing_downloaded"
+    # is exactly the kind of true, complete, useless answer that made this
+    # failure invisible in the first place.
+    none_reason: NoImageReason | None = None
     files: list[ImageFile] = Field(default_factory=list)
+
+    @field_validator("none_reason", mode="before")
+    @classmethod
+    def _forget_retired_names(cls, value: object) -> object:
+        """A record written before the vocabulary closed must still load.
+
+        The ledger is authoritative and its rows outlive any one release, so a
+        name we have since retired cannot be allowed to raise -- that would make
+        every historic job undownloadable, which is a worse failure than a stale
+        word. Unknown names read as None rather than as their nearest neighbour:
+        the retired bucket meant several different things and guessing which one
+        this row was would be inventing evidence.
+
+        The row's own `reason` string is untouched, and `failure_reason` on the
+        ledger row is what `failed.csv` prints -- so nothing an operator reads is
+        lost here.
+        """
+        from .images.reasons import parse
+
+        return parse(value) if isinstance(value, str) else value
 
     tier1_attempted: bool = True
     tier1_passed: bool = False
@@ -279,6 +335,39 @@ class ProductRecord(BaseModel):
     # what was available before any network call was made.
     image_candidates: list[str] = Field(default_factory=list)
     structured_syntaxes: list[str] = Field(default_factory=list)
+
+    # What kind of page this turned out to be. Empty means nothing was wrong
+    # that `fetch/shape.py` could see -- NOT "definitely a product page". A
+    # captcha wall, a sign-in interstitial and a "no longer available" notice
+    # all arrive as a 200 and extract into a tidy record with no photos, and
+    # reporting that as "extracted fine, no image" is what made the defect this
+    # field exists for invisible.
+    # Which rungs the fetcher tried and what each got. Empty on a row that
+    # succeeded on the first attempt, which is most of them.
+    rungs_tried: str = ""
+    # v5 §5. `21s - fetch 19.8s, parse 0.2s, idle 1.0s`. On the row rather than
+    # in a log, because the question it answers -- "why did this take so long,
+    # and is it us or them?" -- is asked about one URL at a time and is asked
+    # after the run, when the log has scrolled.
+    time_spent: str = ""
+    # The HTTP status, when there was one. Its own field now that
+    # `failure_reason` carries the enum: `http_error_5xx` is the right word for
+    # a person and the wrong one for sorting a spreadsheet.
+    http_status: int | None = None
+
+    page_verdict: str = ""
+    # Which markers matched, so a false positive can be traced to the exact
+    # string that caused it without a debugger.
+    page_evidence: list[str] = Field(default_factory=list)
+
+    # The title as the page stated it, when cleaning shortened it. Kept so a bad
+    # clean is visible in review.csv without re-fetching the page: an operator
+    # who cannot see what was removed cannot tell a good cut from a lost name.
+    title_original: str = ""
+    # What the SEO tail turned out to contain -- "70H Playtime", "BT v5.3".
+    # Real product information that was living in the wrong field, offered to
+    # the description rewriter rather than thrown away.
+    title_attributes: list[str] = Field(default_factory=list)
     image: ImageResult = Field(default_factory=ImageResult)
 
     status: RowStatus = RowStatus.OK

@@ -18,6 +18,13 @@ Serves three deliberately awkward kinds of product page on 127.0.0.1:8799:
                   photo loads fine in your browser on the product page and
                   would be broken for a buyer looking at a haat listing.
 
+  /blocked/<n>    A bot check, served with status 200 -- which is what makes it
+                  dangerous. It parses cleanly into a record with a title and no
+                  photos, so before the page-shape check existed it came out
+                  looking like an ordinary product with a missing image. The row
+                  should fail as `blocked_by_source`, and no browser should be
+                  launched to try again.
+
 Everything is generated locally; nothing here reaches the internet.
 """
 
@@ -118,12 +125,34 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         index = int(path.rstrip("/").rsplit("/", 1)[-1] or 0)
-        if path.startswith("/spa/"):
+        if path.startswith("/blocked/"):
+            # 200, deliberately. A 403 would be caught by the fetcher; this is
+            # the shape that used to slip through as "extracted fine, no photo".
+            self._send(blocked_page(index), "text/html; charset=utf-8", head_only)
+        elif path.startswith("/spa/"):
             self._send(spa_page(index), "text/html; charset=utf-8", head_only)
         elif path.startswith("/hotlinked/"):
             self._send(plain_page(index, "hotlinked"), "text/html; charset=utf-8", head_only)
         else:
             self._send(plain_page(index, "plain"), "text/html; charset=utf-8", head_only)
+
+
+def blocked_page(index: int) -> bytes:
+    """A bot check wearing a 200. Modelled on the real thing, minus anything
+    that would help anyone get past one."""
+    return f"""<!doctype html>
+<html><head><title>Robot Check</title></head>
+<body>
+  <h4>Enter the characters you see below</h4>
+  <p>Sorry, we just need to make sure you're not a robot. For best results,
+     please make sure your browser is accepting cookies.</p>
+  <form method="get" action="/errors/validateCaptcha">
+    <img src="{BASE}/img/plain/{index}.jpg" alt="captcha">
+    <input type="text" name="field-keywords">
+  </form>
+  <p>To discuss automated access to Amazon data please contact
+     api-services-support@example.invalid</p>
+</body></html>""".encode()
 
 
 def main() -> None:

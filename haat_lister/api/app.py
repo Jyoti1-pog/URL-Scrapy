@@ -38,9 +38,13 @@ from ..config import Settings
 from ..utils.logging import get_logger
 from .events import EventBroker
 from .routes import config as config_routes
+from .routes import diagnose as diagnose_routes
 from .routes import downloads as download_routes
+from .routes import find as find_routes
+from .routes import ingest as ingest_routes
 from .routes import jobs as job_routes
 from .routes import rows as row_routes
+from .routes import sheet as sheet_routes
 from .runner import JobRunner
 
 log = get_logger(__name__)
@@ -126,6 +130,10 @@ def create_app(
     app.include_router(job_routes.router)
     app.include_router(row_routes.router)
     app.include_router(download_routes.router)
+    app.include_router(sheet_routes.router)
+    app.include_router(diagnose_routes.router)
+    app.include_router(find_routes.router)
+    app.include_router(ingest_routes.router)
     _install_static(app)
     return app
 

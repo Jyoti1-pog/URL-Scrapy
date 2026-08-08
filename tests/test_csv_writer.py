@@ -202,9 +202,17 @@ def test_rfq_uses_the_literal_yes_not_a_boolean(app_config):
     assert values[HAAT_COLUMNS.index("rfq_min_qty")] == "50"
 
 
-def test_failed_rows_are_not_written_but_do_reach_review(tmp_path, app_config):
+def test_failed_rows_reach_neither_listings_nor_review(tmp_path, app_config):
+    """v5 §1.3. This test used to assert the opposite, in its name.
+
+    A failed row was written into review.csv as well as failed.csv, so three
+    input URLs produced six output rows and the header counted each of them
+    twice. review.csv is a POINTER INTO listings.csv -- if a row is not in
+    listings.csv there is nothing to point at, and nothing on it for a human to
+    decide. The reason on the failed row is the whole story.
+    """
     out = tmp_path / "listings.csv"
-    record = make_record(status=RowStatus.FAILED, failure_reason="no_title")
+    record = make_record(status=RowStatus.FAILED, failure_reason="timeout_read")
 
     with HaatCsvWriter(out, app_config, ImageMode.MANIFEST) as writer:
         assert writer.write(record) is False
@@ -212,7 +220,7 @@ def test_failed_rows_are_not_written_but_do_reach_review(tmp_path, app_config):
 
     rows = list(csv.reader(io.StringIO(out.read_text(encoding="utf-8"))))
     assert len(rows) == 1  # header only
-    assert needs_review(record, app_config)
+    assert not needs_review(record, app_config)
 
 
 # ---------------------------------------------------------------------------
