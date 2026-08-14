@@ -28,6 +28,27 @@ export interface LiveRow extends JobRow {
  * wins by construction: a streamed row_done supersedes a pending ledger row,
  * and a ledger row that already has an outcome ignores a stale row_started.
  */
+/*
+  §1.1's four terminal states, and the two questions the UI asks of them.
+  Exported and shared, because this was previously four separate comparisons
+  against the string "listed" -- a word the server stopped emitting -- and each
+  one had to be found and fixed by hand when the vocabulary changed.
+
+  `reachedListings` is deliberately NOT the same question as "written". A row
+  that needs a human is in listings.csv AND in review.csv, which points into
+  it; that is the one documented overlap, and it is why the tick and the count
+  disagree on purpose.
+*/
+const IN_LISTINGS = ["written", "listed", "needs_human"];
+
+export function reachedListings(row: { outcome?: string | null }): boolean {
+  return IN_LISTINGS.includes(row.outcome ?? "");
+}
+
+export function endedBadly(row: { outcome?: string | null }): boolean {
+  return row.outcome === "failed" || row.outcome === "refused";
+}
+
 export function mergeRows(rows: JobRow[], events: JobEvent[]): LiveRow[] {
   const merged = new Map<number, LiveRow>(rows.map((r) => [r.input_index, { ...r }]));
 
@@ -59,7 +80,15 @@ export function mergeRows(rows: JobRow[], events: JobEvent[]): LiveRow[] {
         ...current,
         live: false,
         stage: undefined,
-        outcome: event.name === "row_done" ? "listed" : "failed",
+        /* §2, one name per outcome. This used to hardcode `listed` / `failed`
+           and DISCARD the outcome the server sends -- a second vocabulary,
+           deciding the same question, in the browser. It cost two visible
+           bugs: a `refused` row arriving live was relabelled `failed`,
+           contradicting the refused count in the same header; and every
+           needs_human row counted as written, so the four numbers stopped
+           summing to the input. The fallback is only for a server too old to
+           send the field. */
+        outcome: event.data.outcome ?? (event.name === "row_done" ? "written" : "failed"),
         row_key: event.data.row_key ?? current.row_key,
         title: event.data.title ?? current.title,
         status: event.data.status ?? current.status,
@@ -119,7 +148,7 @@ export function RowStream({ rows, onPick }: { rows: LiveRow[]; onPick?: (r: Live
             onClick={onPick ? () => onPick(row) : undefined}
           >
             <span className="row-glyph" aria-hidden>
-              {row.outcome === "listed" ? "✓" : row.outcome === "failed" ? "✕" : "·"}
+              {reachedListings(row) ? "✓" : endedBadly(row) ? "✕" : "·"}
             </span>
             <span className="mono row-index">{row.input_index + 1}</span>
             <span className="row-title">
@@ -199,7 +228,7 @@ function TierBadge({ row }: { row: LiveRow }) {
 
 /** The same four numbers as one line, for the finished screen. */
 export function tierSummary(rows: LiveRow[]): string {
-  const done = rows.filter((r) => r.outcome === "listed");
+  const done = rows.filter(reachedListings);
   const by = (tier: string) => done.filter((r) => r.image_tier === tier).length;
   return [
     `direct ${by("direct")}`,
@@ -212,7 +241,7 @@ export function tierSummary(rows: LiveRow[]): string {
 }
 
 export function TierCounts({ rows }: { rows: LiveRow[] }) {
-  const done = rows.filter((r) => r.outcome === "listed");
+  const done = rows.filter(reachedListings);
   const by = (tier: string) => done.filter((r) => r.image_tier === tier).length;
   const hosted = by("hosted");
 

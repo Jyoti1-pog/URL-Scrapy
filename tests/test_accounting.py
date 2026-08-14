@@ -302,6 +302,39 @@ def test_counts_sum_to_input_length(settings: Settings, tmp_path: Path) -> None:
     assert not (failed_urls & review_urls), "a URL is in both failed.csv and review.csv"
 
 
+def test_the_four_header_counts_are_disjoint_and_sum(settings: Settings, tmp_path: Path) -> None:
+    """§1.1 and §9, as arithmetic on the thing an operator reads.
+
+    Found by running the console rather than by reading it. A four-row job
+    rendered `4 written | 4 need a human | 0 refused | 0 failed` -- because
+    `written` meant "reached listings.csv", which INCLUDES needs_human. Every
+    number was defensible and the row of them was not: four counts side by side
+    invite addition, and these added to eight against an input of four.
+
+    So the four are now the four terminal states, disjoint by construction, and
+    "how many rows are in listings.csv" has a field of its own.
+    """
+    from haat_lister.store.ledger import Ledger
+
+    tuned = settings.model_copy(deep=True, update={"root": tmp_path})
+    urls = [(i, f"https://a.example/{i}", "a.example") for i in range(4)]
+    with Ledger(tuned.root / tuned.config.paths.ledger) as ledger:
+        ledger.create_job("j_headers", "{}", urls)
+        ledger.set_outcome("j_headers", 0, WRITTEN, row_key="a")
+        ledger.set_outcome("j_headers", 1, NEEDS_HUMAN, row_key="b")
+        ledger.set_outcome("j_headers", 2, REFUSED_STATE, row_key="c", reason="robots_disallowed")
+        ledger.set_outcome("j_headers", 3, FAILED, row_key="d", reason="timeout_read")
+        counts = ledger.outcome_counts("j_headers")
+
+    header = [counts.get(state, 0) for state in TERMINAL]
+
+    assert header == [1, 1, 1, 1]
+    assert sum(header) == len(urls), "the four counts no longer sum to the input"
+    # And the file count is the wider question, kept apart.
+    in_listings = sum(counts.get(state, 0) for state in IN_LISTINGS)
+    assert in_listings == 2, "listings.csv holds the written AND the needs_human rows"
+
+
 def test_retry_does_not_pick_up_a_refused_row(settings: Settings, tmp_path: Path) -> None:
     """§9. "Retry the N that failed" must exclude the ajio row.
 

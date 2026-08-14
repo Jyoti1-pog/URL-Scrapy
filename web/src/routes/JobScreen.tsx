@@ -17,7 +17,15 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useJobEvents } from "../hooks/useJobEvents";
 import { FillGrid } from "../components/FillGrid";
-import { RowStream, TierCounts, mergeRows, tierSummary, type LiveRow } from "../components/RowStream";
+import {
+  RowStream,
+  TierCounts,
+  endedBadly,
+  mergeRows,
+  reachedListings,
+  tierSummary,
+  type LiveRow,
+} from "../components/RowStream";
 import { Downloads, RunFacts } from "../components/Downloads";
 import { need } from "../lib/plural";
 
@@ -57,10 +65,16 @@ export function JobScreen() {
   }
 
   const rows = mergeRows(job.rows, events);
-  const processed = rows.filter((r) => r.outcome === "listed" || r.outcome === "failed").length;
-  const written = rows.filter((r) => r.outcome === "listed").length;
+  /* §1.1: four terminal states, and every URL is in exactly one -- so these
+     four numbers are disjoint and sum to what was processed. `written` used to
+     mean "reached listings.csv", which INCLUDES needs_human, so a job of four
+     rows rendered "4 written · 4 need a human" and invited the reader to add
+     them. How many rows are in listings.csv is a fact the Downloads panel
+     states directly, next to the file. */
+  const processed = rows.filter((r) => reachedListings(r) || endedBadly(r)).length;
+  const written = rows.filter((r) => r.outcome === "written" || r.outcome === "listed").length;
   const failed = rows.filter((r) => r.outcome === "failed").length;
-  const needsHuman = rows.filter((r) => r.needs_human).length;
+  const needsHuman = rows.filter((r) => r.outcome === "needs_human").length;
   const running = job.state === "running" || job.state === "queued";
 
   return (

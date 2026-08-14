@@ -28,7 +28,9 @@ from ...jobs import (
     FAILED,
     IN_LISTINGS,
     INVALID,
+    LISTED,
     REFUSED,
+    WRITTEN,
     JobPlan,
     is_job_id,
     job_paths,
@@ -419,10 +421,13 @@ def read(job_id: str, request: Request) -> JobOut:
         counts=counts,
         total=total,
         processed=sum(counts.get(state, 0) for state in (*IN_LISTINGS, REFUSED, FAILED)),
-        # `written` means "reached listings.csv", which includes needs_human --
-        # that row IS written, and review.csv points into it rather than
-        # replacing it.
-        written=sum(counts.get(state, 0) for state in IN_LISTINGS),
+        # One of the four terminal states, not "reached listings.csv". Those
+        # two differ by exactly the needs_human rows, and reporting the wider
+        # number under the narrower label made the four counts overlap -- a
+        # four-row job read "4 written | 4 need a human". How many rows are in
+        # listings.csv is stated by the artifact row that offers the file.
+        written=counts.get(WRITTEN, 0) + counts.get(LISTED, 0),
+        in_listings=sum(counts.get(state, 0) for state in IN_LISTINGS),
         refused=counts.get(REFUSED, 0),
         failed=counts.get(FAILED, 0),
         needs_human=needs_human,

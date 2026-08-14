@@ -94,7 +94,7 @@ export function Import() {
   const ready = Boolean(provenance) && (report?.kind === "saved_page" ? Boolean(sourceUrl) : hasUrl);
 
   return (
-    <div className="compose">
+    <div className="bench">
       <h1>Import a file</h1>
       <p className="lede">
         For sites that refuse this tool, and for catalogues you already have. An export from your
@@ -111,7 +111,8 @@ export function Import() {
         />
         {file && (
           <p className="hint">
-            {file.name} · {(file.size / 1024).toFixed(0)} KB
+            {file.name} ·{" "}
+            {file.size < 1024 ? `${file.size} bytes` : `${(file.size / 1024).toFixed(0)} KB`}
           </p>
         )}
         <p className="hint">
@@ -266,16 +267,32 @@ export function Import() {
 
       {result && (
         <section>
-          <h2>
-            {result.written} written · {result.needs_human} need a human · {result.failed} failed
-          </h2>
+          <h2>Imported</h2>
+          <p className="tiers mono">
+            <span className={result.written ? "depth-high" : "depth-none"}>
+              {result.written} written
+            </span>{" "}
+            ·{" "}
+            <span className={result.needs_human ? "is-review" : "depth-none"}>
+              {result.needs_human} need a human
+            </span>{" "}
+            · <span className={result.failed ? "is-failed" : "depth-none"}>
+              {result.failed} failed
+            </span>
+          </p>
           {result.profile_saved && (
             <p className="hint">Saved the mapping as {result.profile_saved}.</p>
           )}
           <ul className="rows">
             {result.rows.map((row) => (
               <li key={row.source_url}>
-                <span className={`badge is-${row.status.replace("_", "-")}`}>{row.status}</span>{" "}
+                <span
+                  className={`row-tier mono ${
+                    row.status === "needs_human" ? "is-review" : row.status === "written" ? "" : "is-failed"
+                  }`}
+                >
+                  {row.status.replace("_", " ")}
+                </span>{" "}
                 <strong>{row.title || row.source_url}</strong>
                 {row.no_image_reason && (
                   <span className="hint mono"> no photo: {row.no_image_reason}</span>

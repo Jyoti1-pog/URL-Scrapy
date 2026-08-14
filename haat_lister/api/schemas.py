@@ -280,8 +280,16 @@ class JobOut(BaseModel):
     counts: dict[str, int]
     total: int
     processed: int
-    # Reached listings.csv -- includes needs_human, because that row IS written.
+    # One of §1.1's four terminal states: rows that came out clean. Disjoint
+    # from `needs_human`, `refused` and `failed`, so the four sum to
+    # `processed` and a header can print them side by side.
     written: int
+    # How many rows are in listings.csv -- `written` PLUS `needs_human`, since
+    # a row that needs a human is still written and review.csv points into it
+    # rather than replacing it. Two fields because they answer two questions;
+    # one field answering both is what made a four-row job report
+    # "4 written | 4 need a human".
+    in_listings: int = 0
     failed: int
     # The site declined and stopping was correct. Separate from `failed` so the
     # header can say so and the retry button can exclude them: retrying a
