@@ -51,6 +51,23 @@ from ..utils.urls import host_of
 
 log = get_logger(__name__)
 
+# The order `validate` actually runs the predicates in, with their spec numbers.
+# Written down because `diagnose` reconstructs the walk from the one predicate a
+# ValidationResult names -- "stopped at 6" only means "1, 8, 9, 2, 3, 4, 5 passed"
+# if something states that sequence. Reading it off a comment would let the two
+# drift; a test asserts this matches `validate`.
+EVALUATION_ORDER: tuple[tuple[int, str], ...] = (
+    (1, "syntax"),
+    (8, "not signed or expiring"),
+    (9, "host reputation"),
+    (2, "reachable"),
+    (3, "redirect chain"),
+    (4, "content-type"),
+    (5, "size floor"),
+    (6, "decodable, dimensions"),
+    (7, "hotlink test"),
+)
+
 # Magic bytes for the formats a marketplace photo could plausibly be. Checked
 # before Pillow so that an HTML block page served with `Content-Type: image/jpeg`
 # is rejected as undecodable rather than tying up the decoder.
@@ -92,8 +109,44 @@ def sniff_format(head: bytes) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _data_uri_mime(url: str) -> str:
+    head = url[5 : url.find(",")] if "," in url else ""
+    return head.split(";")[0] or "application/octet-stream"
+
+
+def _decode_data_uri(url: str) -> bytes:
+    """The bytes out of a `data:` candidate. Never raises for junk.
+
+    Inlined images from a saved page arrive this way. `file://` was the obvious
+    alternative and is deliberately not used: a scheme that reads local disk
+    through the image chain would be a hole straight past the SSRF guard, and
+    the guard is the reason nothing in this program can be talked into fetching
+    `169.254.169.254`.
+    """
+    from base64 import b64decode
+    from urllib.parse import unquote_to_bytes
+
+    comma = url.find(",")
+    if comma < 0:
+        return b""
+    header, payload = url[5:comma], url[comma + 1 :]
+    try:
+        if "base64" in header:
+            return b64decode(payload, validate=False)
+        return unquote_to_bytes(payload)
+    except (ValueError, TypeError):
+        return b""
+
+
 def check_syntax(url: str) -> str | None:
-    """Predicate 1. Absolute http(s) with a host."""
+    """Predicate 1. Absolute http(s) with a host -- or an inlined image.
+
+    `data:` is admitted here and nowhere else. It carries its own bytes, so it
+    has no host to resolve and nothing for the SSRF guard to be asked about;
+    every remaining predicate still runs against it unchanged.
+    """
+    if url.startswith("data:"):
+        return None if _data_uri_mime(url).startswith("image/") else "bad_syntax"
     try:
         parsed = httpx.URL(url)
     except (httpx.InvalidURL, ValueError, TypeError):
@@ -137,14 +190,36 @@ def check_content_type(content_type: str | None) -> str | None:
     return None
 
 
+# The smallest well-formed image there is: a 26-byte 1x1 GIF. Below that, no
+# byte sequence can encode a picture in any format, so a Content-Length under
+# it is not describing a small image -- it is not describing an image.
+#
+# Tight on purpose. An earlier attempt used 64, which swallowed the genuine
+# 43-byte tracking pixel this floor exists to kill -- caught by the test that
+# asserts exactly that, which is why the number is the real minimum rather than
+# a comfortable round one.
+SMALLEST_POSSIBLE_IMAGE = 26
+
+
 def check_size_floor(content_length: int | None, min_bytes: int) -> str | None:
     """Predicate 5. Kills tracking pixels and placeholders.
 
     A missing Content-Length does NOT fail here. Chunked responses and plenty of
     CDNs omit it, and rejecting those would throw away good images; predicate 6
     enforces the floor on bytes actually read instead.
+
+    An IMPOSSIBLE Content-Length is treated the same way, and that is not a
+    loosening. Flipkart's CDN answers HEAD with `Content-Length: 20` and
+    `image/webp` for a 1500x1500 photograph -- a stub for HEAD, the real file
+    for GET. Twenty bytes cannot encode any image in any format, so believing
+    it rejected every photograph on the site as `too_small`. Below this
+    threshold the header is not evidence about the picture; predicate 6 reads
+    actual bytes and enforces the floor on those, which is where a genuine
+    43-byte tracking pixel dies anyway.
     """
-    if content_length is not None and content_length < min_bytes:
+    if content_length is None or content_length < SMALLEST_POSSIBLE_IMAGE:
+        return None
+    if content_length < min_bytes:
         return "too_small"
     return None
 
@@ -170,8 +245,17 @@ def check_redirect_chain(response: httpx.Response, max_hops: int) -> str | None:
 
 def check_dimensions(image: Image.Image, cfg: ValidatorConfig) -> str | None:
     """Predicate 6, second half. haat is a premium marketplace; thumbnails are
-    not listable."""
+    not listable.
+
+    Two reasons, not one. `below_min_dimensions` means "under the standard but
+    usable, and an operator may want it anyway"; `unusably_small` means the
+    answer is no whatever they think. Only the first is eligible for the low-res
+    tier, and keeping them apart is what stops that tier turning the standard
+    into a suggestion.
+    """
     width, height = image.size
+    if width < cfg.hard_min_width or height < cfg.hard_min_height:
+        return "unusably_small"
     if width < cfg.min_width or height < cfg.min_height:
         return "below_min_dimensions"
     return None
@@ -258,9 +342,12 @@ class Tier1Validator:
         except _ProbeFailed as exc:
             return result(False, exc.reason, 6)
 
-        if probe.content_length is None and bytes_read < cfg.min_bytes:
-            # Deferred from predicate 5: no Content-Length, and the whole file
-            # turned out to be smaller than the floor.
+        if (
+            probe.content_length is None or probe.content_length < SMALLEST_POSSIBLE_IMAGE
+        ) and bytes_read < cfg.min_bytes:
+            # Deferred from predicate 5: the header was absent or impossible,
+            # and the bytes we actually read came in under the floor. This is
+            # where a real tracking pixel dies.
             return result(False, "too_small", 5)
 
         width, height = image.size
@@ -268,6 +355,12 @@ class Tier1Validator:
             return result(False, reason, 6, width, height)
 
         # --- predicate 7: would a third party get this image? --------------
+        #
+        # An inlined image has no third party to ask. It is not "passed" -- it
+        # is not applicable, and a saved-page row therefore cannot end up
+        # hotlinking anything, because there is no remote URL to hotlink.
+        if url.startswith("data:"):
+            return result(True, "direct_ok", None, width, height)
         if self._hotlink_test and not await self._hotlink_ok(url):
             self._record_hotlink_failure(url)
             return result(False, "hotlink_blocked", 7, width, height)
@@ -280,6 +373,19 @@ class Tier1Validator:
 
     async def _probe(self, url: str) -> _Probe:
         """HEAD, falling back to a ranged GET where HEAD is not honoured."""
+        if url.startswith("data:"):
+            # v5 §4.2. A photo the operator's own browser already saved. It
+            # goes through all nine predicates like any other candidate -- the
+            # bytes are simply already here, so predicates 2 and 3 are answered
+            # without asking anyone. Handled at this seam rather than by
+            # skipping the validator, because "imported images are trusted" is
+            # how an unlistable 90x90 thumbnail reaches a live listing.
+            blob = _decode_data_uri(url)
+            return _Probe(
+                response=httpx.Response(200, request=httpx.Request("GET", "https://saved.local/")),
+                content_type=_data_uri_mime(url),
+                content_length=len(blob),
+            )
         response = await self._request_with_fallback(url)
         if response.status_code >= 400:
             raise _ProbeFailed(f"http_{response.status_code}")
@@ -317,6 +423,17 @@ class Tier1Validator:
         Without that, every WebP image on the web would fail Tier 1, and haat's
         own storage serves WebP.
         """
+        if url.startswith("data:"):
+            blob = _decode_data_uri(url)
+            # The magic-byte sniff still applies. A saved page can perfectly
+            # well carry an inlined tracking pixel or an SVG, and the operator
+            # having supplied it does not make it a product photograph.
+            if not sniff_format(blob[:16]):
+                raise _ProbeFailed("undecodable")
+            if (opened := _try_open(blob)) is None:
+                raise _ProbeFailed("undecodable")
+            return opened, len(blob)
+
         buffer = bytearray()
         threshold = self._cfg.header_probe_bytes
         hard_cap = max(self._cfg.max_probe_bytes, threshold)
@@ -419,17 +536,37 @@ def _int_or_none(value: str | None) -> int | None:
 
 
 async def validate_all_candidates(
-    candidates: list[str], validator: Tier1Validator
+    candidates: list[str],
+    validator: Tier1Validator,
+    *,
+    stop_at_first: bool = True,
+    max_ok: int | None = None,
 ) -> tuple[ValidationResult | None, list[ValidationResult]]:
-    """Walk candidates in rank order and stop at the first that passes.
+    """Walk candidates in rank order. Returns (winner or None, every result).
 
-    Returns (winner or None, every result including the winner). Tier 1 stopping
-    early is the whole point: on a healthy page this is one HEAD request.
+    `stop_at_first` is the default because a JOB needs one hero photo, and
+    stopping early is what makes Tier 1 a single HEAD request on a healthy
+    page -- across a 200-URL catalogue that economy is the whole design.
+
+    Find photos passes False, because its subtitle promises "every photo for
+    every product" and it was delivering one. It writes nothing and creates no
+    listing, so the only thing that costs is time.
+
+    `max_ok` stops the walk once that many have passed, so the candidate pool
+    can be wide -- wide enough to reach a gallery sitting behind a page's menu
+    icons -- without a page of forty images costing forty requests when ten
+    photographs is all anybody wanted.
     """
     results: list[ValidationResult] = []
+    winner: ValidationResult | None = None
     for url in candidates:
         result = await validator.validate(url)
         results.append(result)
         if result.ok:
-            return result, results
-    return None, results
+            if winner is None:
+                winner = result
+            if stop_at_first:
+                return winner, results
+            if max_ok is not None and sum(1 for r in results if r.ok) >= max_ok:
+                return winner, results
+    return winner, results

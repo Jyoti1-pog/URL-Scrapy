@@ -7,7 +7,8 @@ of being invoked, not of any particular pipeline stage.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import sys
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -26,7 +27,24 @@ if TYPE_CHECKING:  # heavy imports stay out of `--help`
 
     from .batch import BatchOptions, BatchStats, StopSignal
 
-console = Console()
+def _console() -> Console:
+    """A console that can print the words we wrote.
+
+    Windows terminals still default to cp1252, which turns the em dash in
+    `what_to_do` into `?` -- on the one line whose whole job is telling an
+    operator their next action. Rich will re-encode when told; when the stream
+    cannot be re-encoded (a pipe, a captured buffer) we fall back rather than
+    fail, and rich substitutes per character.
+    """
+    stream = sys.stdout
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        with suppress(Exception):
+            reconfigure(encoding="utf-8", errors="replace")
+    return Console()
+
+
+console = _console()
 
 app = typer.Typer(
     name="haat-lister",
@@ -52,6 +70,15 @@ ProvenanceOpt = Annotated[
 ImagesOpt = Annotated[
     ImageMode | None,
     typer.Option("--images", help="manifest (default) | url_columns | both."),
+]
+UrlTimeoutOpt = Annotated[
+    float | None,
+    typer.Option(
+        "--url-timeout",
+        help="Seconds for ONE url, covering every attempt: all fetch rungs, the browser, "
+        "and any retry. Default 20. Raise it for a shop that is genuinely slow rather "
+        "than refusing.",
+    ),
 ]
 RenderOpt = Annotated[
     bool | None,
@@ -130,6 +157,12 @@ def _resolve_provenance(value: Provenance | None) -> Provenance:
             )
         )
     return value
+
+
+def rows_need(count: int) -> str:
+    """"1 row needs" / "38 rows need". The console had this wrong in three
+    places because the rule lived in none of them."""
+    return f"{count} row{'' if count == 1 else 's'} {'needs' if count == 1 else 'need'}"
 
 
 def _error_panel(text: str, title: str) -> Panel:
@@ -235,6 +268,7 @@ def single(
         typer.Option("--ignore-robots", help="Skip robots.txt. Only for sites you own."),
     ] = False,
     render: RenderOpt = None,
+    url_timeout: UrlTimeoutOpt = None,
     llm: LlmOpt = False,
     json_only: Annotated[
         bool, typer.Option("--json", help="Print the record JSON and write nothing.")
@@ -247,6 +281,14 @@ def single(
         str | None, typer.Option("--seller-note", help="Applied to every row.")
     ] = None,
     excel_bom: Annotated[bool, typer.Option("--excel-bom")] = False,
+    merge_variants: Annotated[
+        bool,
+        typer.Option(
+            "--merge-variants",
+            help="Treat ?variant= links to one product as one row. Off by default: a size "
+            "at a different price is usually its own haat listing.",
+        ),
+    ] = False,
     config: ConfigOpt = None,
     verbose: VerboseOpt = 0,
     log_file: LogFileOpt = None,
@@ -270,6 +312,18 @@ def single(
 
     if excel_bom:
         settings.config.csv.excel_bom = True
+
+    # Set on the config rather than passed down: every caller already reads it
+    # from there, and a parameter that only some paths carry is how `single`
+    # and `batch` end up honouring different deadlines.
+    if url_timeout:
+        settings.config.fetch.url_timeout_s = url_timeout
+
+    if merge_variants:
+        # Set on the config so `settings.identity` carries it, which is what
+        # every call site reads. Setting it anywhere else would mean the
+        # planner and the record disagreeing about what one product is.
+        settings.config.canonical.merge_variants = True
 
     if ignore_robots:
         console.print(
@@ -479,7 +533,7 @@ def _render_output_summary(
         lines.append(
             f"  {csv_writer.skipped_failed} failed row(s) not written -- see review.csv"
         )
-    lines.append(f"[yellow]{review_path}[/yellow]   {review_writer.written} row(s) need a human")
+    lines.append(f"[yellow]{review_path}[/yellow]   {rows_need(review_writer.written)} a human")
 
     if manifest_writer is not None:
         images_dir = settings.root / settings.config.paths.images_dir
@@ -611,10 +665,26 @@ def batch(
         bool,
         typer.Option("--resume", help="Skip URLs already completed in an earlier run."),
     ] = False,
+    master: Annotated[
+        bool,
+        typer.Option(
+            "--master",
+            help="Also append this job's rows to runs/master.csv, the sheet that accumulates "
+            "across jobs. Off here, on in the web console.",
+        ),
+    ] = False,
+    on_duplicate: Annotated[
+        str,
+        typer.Option(
+            "--on-duplicate",
+            help="What --master does with a URL already in the sheet: skip | replace | append.",
+        ),
+    ] = "skip",
     ignore_robots: Annotated[
         bool, typer.Option("--ignore-robots", help="Skip robots.txt. Only for sites you own.")
     ] = False,
     render: RenderOpt = None,
+    url_timeout: UrlTimeoutOpt = None,
     llm: LlmOpt = False,
     description_mode: Annotated[
         DescriptionMode, typer.Option("--description-mode")
@@ -623,6 +693,14 @@ def batch(
         str | None, typer.Option("--seller-note", help="Applied to every row.")
     ] = None,
     excel_bom: Annotated[bool, typer.Option("--excel-bom")] = False,
+    merge_variants: Annotated[
+        bool,
+        typer.Option(
+            "--merge-variants",
+            help="Treat ?variant= links to one product as one row. Off by default: a size "
+            "at a different price is usually its own haat listing.",
+        ),
+    ] = False,
     config: ConfigOpt = None,
     verbose: VerboseOpt = 0,
     log_file: LogFileOpt = None,
@@ -662,13 +740,25 @@ def batch(
     if excel_bom:
         settings.config.csv.excel_bom = True
 
+    # Set on the config rather than passed down: every caller already reads it
+    # from there, and a parameter that only some paths carry is how `single`
+    # and `batch` end up honouring different deadlines.
+    if url_timeout:
+        settings.config.fetch.url_timeout_s = url_timeout
+
+    if merge_variants:
+        # Set on the config so `settings.identity` carries it, which is what
+        # every call site reads. Setting it anywhere else would mean the
+        # planner and the record disagreeing about what one product is.
+        settings.config.canonical.merge_variants = True
+
     if ignore_robots:
         console.print(
             "[yellow]--ignore-robots is set: robots.txt will not be consulted for any URL "
             "in this file. Only do this on sites you own.[/yellow]"
         )
 
-    plan = plan_urls(urls_file.read_text(encoding="utf-8").splitlines())
+    plan = plan_urls(urls_file.read_text(encoding="utf-8").splitlines(), settings.identity)
     if not plan.accepted:
         console.print(
             _error_panel(
@@ -706,6 +796,8 @@ def batch(
         resume=resume,
         seller_note=seller_note,
         description_mode=effective_description_mode(description_mode, prov),
+        master=master,
+        on_duplicate=on_duplicate,
     )
     stats = asyncio.run(_run_batch(plan, settings, options, ignore_robots, render, llm))
     _render_batch_summary(stats, settings, options)
@@ -878,7 +970,7 @@ def _render_batch_summary(
     lines = [
         f"[bold]{paths.root}[/bold]",
         f"[green]listings.csv[/green]         {stats.written} row(s), in the order you pasted them",
-        f"[yellow]review.csv[/yellow]           {stats.needs_review} row(s) need a human",
+        f"[yellow]review.csv[/yellow]           {rows_need(stats.needs_review)} a human",
     ]
     if stats.failed_written:
         lines.append(
@@ -903,6 +995,13 @@ def _render_batch_summary(
             f"  [dim]peak rows finished-but-waiting for an earlier one: "
             f"{stats.peak_pending}[/dim]"
         )
+
+    # The sheet, said rather than left to be discovered. An operator who does
+    # not know it exists will keep merging files by hand.
+    if stats.master is not None:
+        lines.append(f"[green]master.csv[/green]           {stats.master.summary()}")
+    if stats.master_error:
+        lines.append(f"[yellow]master.csv[/yellow]           {stats.master_error.splitlines()[0]}")
 
     lines.append(
         f"Image-host calls: {stats.host_calls}   peak rows in flight: {stats.peak_in_flight}"
@@ -941,6 +1040,554 @@ def _render_batch_summary(
             title="batch complete",
             border_style="yellow" if stats.stopped_early or stats.failed else "blue",
         )
+    )
+
+
+# --------------------------------------------------------------------------
+# diagnose
+# --------------------------------------------------------------------------
+
+
+@app.command("import")
+def import_file(
+    path: Annotated[
+        Path,
+        typer.Argument(
+            help="A seller export (.csv/.tsv/.xlsx) or a saved page (.html/.mhtml/folder).",
+        ),
+    ],
+    provenance: ProvenanceOpt = None,
+    source_url: Annotated[
+        str | None,
+        typer.Option(
+            "--source-url",
+            help="For a saved page that does not record where it came from.",
+        ),
+    ] = None,
+    images: ImagesOpt = None,
+    description_mode: Annotated[
+        DescriptionMode, typer.Option("--description-mode")
+    ] = DescriptionMode.RAW,
+    save_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--save-profile",
+            help="Remember this export's column mapping under this name, for next time.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show the column mapping and stop. Writes nothing."),
+    ] = False,
+    out: Annotated[Path | None, typer.Option("--out", help="listings.csv path.")] = None,
+    seller_note: Annotated[str | None, typer.Option("--seller-note")] = None,
+    config: ConfigOpt = None,
+    verbose: VerboseOpt = 0,
+    log_file: LogFileOpt = None,
+) -> None:
+    """§4. Import from a seller export or a page you saved from your browser.
+
+    The route that works when fetching does not. Rows built here go through the
+    same extraction, the same nine image predicates and the same provenance
+    gate as a fetched URL -- `--provenance` is required here exactly as it is
+    everywhere else.
+    """
+    import asyncio
+
+    from .ingest import saved_page, seller_export
+    from .utils.logging import setup_logging
+
+    setup_logging(verbose, log_file)
+    prov = _resolve_provenance(provenance)
+    settings = _load_settings(config)
+    mode = images or settings.config.images.default_mode
+
+    suffix = path.suffix.lower()
+    is_export = suffix in seller_export.SUFFIXES and suffix not in saved_page.SUFFIXES
+
+    try:
+        if is_export:
+            records = asyncio.run(
+                _import_export(
+                    path, prov, settings, mode, description_mode, seller_note,
+                    save_profile, dry_run,
+                )
+            )
+        else:
+            records = asyncio.run(
+                _import_pages(
+                    path, prov, settings, mode, description_mode, seller_note,
+                    source_url or "",
+                )
+            )
+    except (saved_page.SavedPageError, seller_export.ExportError) as exc:
+        console.print(_error_panel(str(exc), "Could not read that file"))
+        raise typer.Exit(code=2) from exc
+
+    if dry_run or not records:
+        raise typer.Exit(code=0)
+
+    _write_outputs(records, settings, mode, out)
+    failed = sum(1 for r in records if r.status is RowStatus.FAILED)
+    raise typer.Exit(code=1 if failed == len(records) else 0)
+
+
+def _render_mapping(export) -> None:  # noqa: ANN001 -- seller_export.Export
+    """The mapper, on the terminal. §4.1: nothing is discarded silently."""
+    from rich.markup import escape
+
+    from .ingest.seller_export import known_unused
+
+    console.print(f"\n[bold blue]COLUMNS[/bold blue]  {escape(export.path.name)}")
+    if export.profile_used:
+        console.print(f"  [green]saved profile applied:[/green] {escape(export.profile_used)}")
+
+    for column in export.columns:
+        if column.mapped:
+            mark, target = "[green]->[/green]", column.target
+        elif recognised := known_unused(column.header):
+            mark, target = "[dim]--[/dim]", f"[dim]{recognised}: no haat column for it[/dim]"
+        else:
+            mark, target = "[yellow]??[/yellow]", "[yellow]not mapped[/yellow]"
+        sample = escape(column.samples[0][:38]) if column.samples else ""
+        console.print(f"  {mark} [bold]{escape(column.header[:28]):<28}[/bold] {target}")
+        if sample:
+            console.print(f"       [dim]e.g. {sample}[/dim]")
+
+    unmapped = len(export.unmapped)
+    console.print(
+        f"\n  {len(export.rows)} row(s), {len(export.columns) - unmapped} column(s) mapped"
+        + (f", [yellow]{unmapped} not used[/yellow]" if unmapped else "")
+    )
+
+
+async def _import_export(
+    path: Path,
+    prov: Provenance,
+    settings: Settings,
+    image_mode: ImageMode,
+    description_mode: DescriptionMode,
+    seller_note: str | None,
+    save_profile: str | None,
+    dry_run: bool,
+) -> list[ProductRecord]:
+    from .fetch.static import build_client
+    from .images.hosts import build_hosts
+    from .images.pipeline import ImageResolver
+    from .ingest import run as ingest_run
+    from .ingest import seller_export
+    from .store.ledger import Ledger
+
+    export = seller_export.parse(path, settings)
+    _render_mapping(export)
+
+    if not export.mapping.get("source_url"):
+        console.print(
+            _error_panel(
+                "No column in this file looks like a product URL, and every row needs one: "
+                "it is what the row is keyed on and deduplicated by. Rename the column to "
+                '"url" or map it on the import screen.',
+                "No URL column",
+            )
+        )
+        raise typer.Exit(code=2)
+
+    if save_profile:
+        saved = seller_export.save_profile(settings, save_profile, export)
+        console.print(f"  [green]profile saved:[/green] {saved}")
+
+    if dry_run:
+        console.print("\n[dim]--dry-run: no rows built, no files written.[/dim]")
+        return []
+
+    records: list[ProductRecord] = []
+    with Ledger(settings.root / settings.config.paths.ledger) as ledger:
+        async with build_client(settings) as client:
+            hosts, skipped = build_hosts(settings, client, image_mode)
+            _warn_about_hosts(hosts, skipped, image_mode)
+            resolver = ImageResolver(settings, client, image_mode, hosts=hosts, ledger=ledger)
+            for row in export.rows:
+                records.append(
+                    await ingest_run.from_export_row(
+                        export, row, prov, settings,
+                        seller_note=seller_note,
+                        description_mode=description_mode,
+                        resolver=resolver,
+                    )
+                )
+    console.print(f"  built {rows_need(len(records))}")
+    return records
+
+
+async def _import_pages(
+    path: Path,
+    prov: Provenance,
+    settings: Settings,
+    image_mode: ImageMode,
+    description_mode: DescriptionMode,
+    seller_note: str | None,
+    source_url: str,
+) -> list[ProductRecord]:
+    from .extract.plugins import build_registry
+    from .fetch.static import build_client
+    from .images.hosts import build_hosts
+    from .images.pipeline import ImageResolver
+    from .ingest import run as ingest_run
+    from .ingest import saved_page
+    from .store.ledger import Ledger
+
+    # A folder of saved pages is the shape an operator ends up with after an
+    # afternoon of Ctrl+S, so it is worth handling. One file is the same code
+    # with a list of length one.
+    if path.is_dir() and not saved_page.sidecar_for(path / "index.html"):
+        files = sorted(c for c in path.iterdir() if c.suffix.lower() in saved_page.SUFFIXES)
+    else:
+        files = [path]
+    if not files:
+        raise saved_page.SavedPageError(f"No saved pages found in {path}.")
+    if len(files) > 1 and source_url:
+        raise saved_page.SavedPageError(
+            "--source-url names one page, but this is a folder of several. Import them "
+            "one at a time, or let each file say where it came from."
+        )
+
+    records: list[ProductRecord] = []
+    with Ledger(settings.root / settings.config.paths.ledger) as ledger:
+        async with build_client(settings) as client:
+            hosts, skipped = build_hosts(settings, client, image_mode)
+            _warn_about_hosts(hosts, skipped, image_mode)
+            resolver = ImageResolver(settings, client, image_mode, hosts=hosts, ledger=ledger)
+            plugins = build_registry(settings.config, settings.root)
+            for file in files:
+                record = await ingest_run.from_saved_page(
+                    file, prov, settings,
+                    source_url=source_url,
+                    seller_note=seller_note,
+                    description_mode=description_mode,
+                    resolver=resolver,
+                    plugins=plugins,
+                )
+                console.print(f"  [green]read[/green] {file.name} -> {record.source_url}")
+                records.append(record)
+    return records
+
+
+@app.command()
+def preflight(
+    source: Annotated[
+        Path, typer.Argument(help="A file of URLs, one per line (or anything containing them).")
+    ],
+    config: ConfigOpt = None,
+    verbose: VerboseOpt = 0,
+) -> None:
+    """§4.4. What we already know about these domains, before the run starts.
+
+    Reads robots.txt once per host and consults `domains.yaml`, the record of
+    refusals previous runs observed. It never prevents anything: it exists so
+    that a four-minute wait does not end in news that was available at second
+    zero.
+    """
+    import asyncio
+
+    from .utils.logging import setup_logging
+    from .utils.urls import extract_urls
+
+    setup_logging(verbose, None)
+    settings = _load_settings(config)
+
+    try:
+        found = extract_urls(source.read_text(encoding="utf-8", errors="replace"))
+    except OSError as exc:
+        console.print(_error_panel(str(exc), "Could not read that file"))
+        raise typer.Exit(code=2) from exc
+
+    report = asyncio.run(_run_preflight([f.url for f in found.urls], settings))
+
+    console.print(f"\n[bold blue]PREFLIGHT[/bold blue]  {report.summary()}")
+    for warning in report.warnings:
+        style = "red" if warning.source == "robots" else "yellow"
+        console.print(
+            f"  [{style}]{warning.reason:<20}[/{style}] {warning.host}  "
+            f"[dim]({rows_need(warning.urls)})[/dim]"
+        )
+        console.print(f"       [dim]{warning.detail}[/dim]")
+
+    if report.warnings:
+        console.print(
+            "\n[dim]Nothing here stops a run. robots refusals will fail those rows; "
+            "history is only what happened last time.[/dim]"
+        )
+    raise typer.Exit(code=0)
+
+
+async def _run_preflight(urls: list[str], settings: Settings):
+    from . import preflight as preflight_mod
+    from .fetch.static import build_client
+
+    async with build_client(settings) as client:
+        return await preflight_mod.check(urls, settings, client)
+
+
+@app.command()
+def diagnose(
+    url: Annotated[str, typer.Argument(help="One product page URL.")],
+    check_all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Check every candidate instead of stopping at the first that passes. "
+            "Costs more requests; shows the whole gallery's health.",
+        ),
+    ] = False,
+    no_hotlink_test: Annotated[
+        bool, typer.Option("--no-hotlink-test", help="Skip predicate 7. Results become optimistic.")
+    ] = False,
+    ignore_robots: Annotated[
+        bool, typer.Option("--ignore-robots", help="Skip robots.txt. Only for sites you own.")
+    ] = False,
+    render: RenderOpt = None,
+    json_only: Annotated[
+        bool, typer.Option("--json", help="Print the report as JSON instead of a table.")
+    ] = False,
+    config: ConfigOpt = None,
+    verbose: VerboseOpt = 0,
+) -> None:
+    """Explain what this page gives us, and why its image resolved the way it did.
+
+    Writes nothing. No CSV, no image files, and no image host is contacted --
+    Tier 2 is not on this path. `--provenance` is not required for the same
+    reason: nothing here produces a listing.
+    """
+    import asyncio
+
+    from .diagnose import diagnose_url
+    from .utils.logging import setup_logging
+
+    setup_logging(verbose)
+    settings = _load_settings(config)
+
+    report = asyncio.run(
+        diagnose_url(
+            url,
+            settings,
+            ignore_robots=ignore_robots,
+            render=render,
+            check_all=check_all,
+            no_hotlink_test=no_hotlink_test,
+        )
+    )
+
+    if json_only:
+        print(report.model_dump_json(indent=2))
+    else:
+        _render_diagnosis(report)
+
+    raise typer.Exit(code=0 if report.images.method != "none" else 1)
+
+
+_OUTCOME_STYLE = {"ok": "green", "fail": "red", "not reached": "dim", "skipped": "yellow"}
+
+def _check(value: str, alarming: str) -> str:
+    """§3.1. One check in three states, never two.
+
+    `not reached` is dimmed rather than coloured, because it is not a finding
+    and styling it like one is how it gets read as `no` all over again.
+    `alarming` differs per question: a captcha wall is bad news when the answer
+    is `yes`, and a product page is bad news when the answer is `no`.
+    """
+    if value == "not reached":
+        return "[dim]-- not reached[/dim]"
+    return f"[red]{value}[/red]" if value == alarming else value
+
+
+def _shape_questions(shape) -> tuple[tuple[str, str, str], ...]:  # noqa: ANN001
+    """Stacked rather than joined with pipes: four three-state answers on one
+    line wrap at any terminal width, and a wrapped answer is a misread one."""
+    return (
+        ("looks like a product page?", str(shape.looks_like_product), "no"),
+        ("captcha wall?", str(shape.captcha), "yes"),
+        ("login wall?", str(shape.login_wall), "yes"),
+        ("unavailable?", str(shape.unavailable), "yes"),
+    )
+
+
+def _render_diagnosis(report) -> None:  # noqa: ANN001 -- diagnose.Diagnosis
+    """§4.1's layout. Plain rows rather than boxes: this is read top to bottom."""
+    from rich.markup import escape
+
+    from .diagnose import human_bytes
+
+    def line(label: str, text: str) -> None:
+        console.print(f"  [bold]{label:<9}[/bold] {text}")
+
+    fetch = report.fetch
+    console.print("\n[bold blue]FETCH[/bold blue]")
+    if fetch.ok:
+        line(
+            "stage A",
+            f"{fetch.status_code}  {escape(fetch.content_type or '?')}  "
+            f"{human_bytes(fetch.bytes)}  {fetch.elapsed_ms / 1000:.1f}s"
+            + ("  [dim](redirected)[/dim]" if fetch.redirected else ""),
+        )
+    else:
+        line(
+            "stage A",
+            f"[red]{escape(fetch.error_reason or 'not attempted')}[/red]  "
+            f"{escape(fetch.error_detail.splitlines()[0] if fetch.error_detail else '')}",
+        )
+
+    # §3.2. One line per rung. Printed on success too: two rungs that failed
+    # before the third answered is the diagnosis, and only the winner shows up
+    # in the summary line above.
+    for attempt in fetch.attempts:
+        mark = "[green]ok  [/green]" if attempt.ok else "[red]fail[/red]"
+        console.print(
+            f"            {mark}  [bold]{attempt.transport:<28}[/bold]"
+            f"{escape(attempt.outcome):<20}{attempt.elapsed_ms / 1000:>5.1f}s"
+        )
+
+    if not fetch.robots_checked:
+        line("robots", "[yellow]not consulted[/yellow]")
+    else:
+        line("robots", "allowed" if fetch.robots_allowed else "[red]disallowed[/red]")
+
+    shape = report.shape
+    for index, (question, answer, alarming) in enumerate(_shape_questions(shape)):
+        label = "page" if index == 0 else ""
+        line(label, f"{question:<28}{_check(answer, alarming)}")
+    if not shape.evaluated:
+        console.print("            [dim]no page arrived, so none of these were asked[/dim]")
+    for item in shape.evidence:
+        console.print(f"            [dim]{escape(item)}[/dim]")
+
+    # §3.3. `off` is not a reason. Every branch names one, and the reason is
+    # decided in `diagnose` rather than re-derived from flags here.
+    stage_b = report.stage_b
+    detail = ""
+    if stage_b.state == "ran":
+        gained = ", ".join(stage_b.gained) or "nothing more"
+        detail = f" (for {escape(', '.join(stage_b.triggers))}) -> {escape(gained)}"
+    elif stage_b.error:
+        detail = f": {escape(stage_b.error)}"
+    style = {"ran": "", "tried and failed": "yellow"}.get(str(stage_b.state), "dim")
+    text = f"{stage_b.state}{detail}"
+    line("stage B", f"[{style}]{text}[/{style}]" if style else text)
+
+    # Both of the next two are checks as well, and both used to answer for a
+    # page that never arrived: `structured: none` and `title: none` read as
+    # findings about the shop rather than as consequences of the fetch.
+    if not fetch.ok:
+        line("structured", "[dim]-- not reached[/dim]")
+    else:
+        line(
+            "structured",
+            escape(", ".join(report.structured_syntaxes) or "none (meta tags and DOM only)"),
+        )
+
+    title = report.title
+    console.print("\n[bold blue]TITLE[/bold blue]")
+    if not fetch.ok:
+        console.print("  [dim]-- not reached (no page arrived)[/dim]")
+    elif title.value:
+        console.print(
+            f'  "{escape(title.value)}"  [dim][{escape(title.source or "?")}, '
+            f'{escape(title.confidence)}][/dim]'
+        )
+        if title.note:
+            console.print(f"  [dim]{escape(title.note)}[/dim]")
+    else:
+        console.print("  [red]none[/red]")
+
+    _render_candidates(report)
+
+    method = report.images.method
+    style = "green" if method != "none" else "red"
+    console.print(
+        f"\n[bold blue]RESULT[/bold blue]  image: [{style}]{method}[/{style}]"
+        f"  reason: [{style}]{escape(report.images.reason)}[/{style}]"
+    )
+    if report.images.explanation:
+        console.print(f"  {escape(report.images.explanation)}")
+
+    if not report.shape_enforced:
+        console.print(
+            "\n[yellow]Note:[/yellow] the page-shape check is diagnostic only so far. A batch run "
+            "would still write this row rather than failing it."
+        )
+
+
+def _render_candidates(report) -> None:  # noqa: ANN001 -- diagnose.Diagnosis
+    from rich.markup import escape
+
+    from .diagnose import human_bytes
+
+    images = report.images
+    if not images.collected:
+        console.print("\n[bold blue]IMAGE CANDIDATES[/bold blue]  [dim]-- not reached[/dim]")
+        return
+    console.print(
+        f"\n[bold blue]IMAGE CANDIDATES[/bold blue]  "
+        f"(kept {len(images.candidates)} of {images.raw_found} reference(s) found)"
+    )
+
+    for rule in images.rules:
+        mark = "[green]ok  [/green]" if rule.found else "[dim]--  [/dim]"
+        count = f"{rule.found}" if rule.found else "nothing"
+        console.print(f"  {mark}[bold]{rule.rule:<24}[/bold] {count}")
+
+    if images.plugin_used:
+        note = "supplied the candidates" if images.plugin_replaced_candidates else "matched"
+        console.print(f"  [cyan]plugin[/cyan] {escape(images.plugin_used)} {note}")
+
+    if images.dropped:
+        console.print(
+            f"  [yellow]dropped {len(images.dropped)} reference(s) before ranking:[/yellow]"
+        )
+        counts: dict[str, int] = {}
+        for drop in images.dropped:
+            counts[drop.why] = counts.get(drop.why, 0) + 1
+        for why, dropped in sorted(counts.items(), key=lambda kv: -kv[1]):
+            console.print(f"      {dropped:>3}  {escape(why)}")
+
+    if not images.candidates:
+        return
+
+    console.print()
+    for candidate in images.candidates:
+        head = f"  [{candidate.index}] {escape(candidate.url)}"
+        console.print(head if len(head) < 160 else head[:157] + "...")
+        console.print(
+            f"      [dim]via {escape(candidate.rule or '?')}"
+            + (f", {escape(candidate.source)}" if candidate.source else "")
+            + "[/dim]"
+        )
+        if not candidate.checked:
+            console.print("      [dim]not tried -- an earlier candidate already passed[/dim]")
+            continue
+        parts = []
+        for step in candidate.steps:
+            style = _OUTCOME_STYLE.get(step.outcome, "dim")
+            label = f"{step.predicate} {step.name}"
+            if step.detail:
+                label += f" {step.detail}"
+            if step.outcome == "fail":
+                label = f"FAIL {label}"
+            elif step.outcome == "not reached":
+                continue
+            parts.append(f"[{style}]{escape(label)}[/{style}]")
+        console.print("      " + " | ".join(parts))
+        if candidate.ok:
+            console.print(
+                f"      [green]passes[/green] at {candidate.width}x{candidate.height}, "
+                f"{escape(candidate.content_type or '?')}, "
+                f"{human_bytes(candidate.content_length)}"
+            )
+
+    console.print(
+        f"\n  [dim]listable minimum: {report.thresholds.min_width}x"
+        f"{report.thresholds.min_height}, at least "
+        f"{human_bytes(report.thresholds.min_bytes)}; hotlink test "
+        f"{'on' if report.thresholds.hotlink_test else 'off'}[/dim]"
     )
 
 
@@ -1215,6 +1862,166 @@ async def _run_rehost(records: list[ProductRecord], settings: Settings, mode: Im
                 f"[dim]Image-host calls this run: {resolver.host_calls}[/dim]"
             )
     return records
+
+
+# --------------------------------------------------------------------------
+# master -- the sheet that fills up
+# --------------------------------------------------------------------------
+
+
+@app.command()
+def master(
+    stats: Annotated[
+        bool, typer.Option("--stats", help="Row count, date range, jobs merged.")
+    ] = False,
+    preview_rows: Annotated[
+        int, typer.Option("--preview", help="Show the first N rows.")
+    ] = 0,
+    push: Annotated[
+        bool,
+        typer.Option(
+            "--push",
+            help="Copy the sheet to the configured Google Sheet. Requires "
+            "GOOGLE_CREDENTIALS_FILE and GOOGLE_SHEET_ID.",
+        ),
+    ] = False,
+    config: ConfigOpt = None,
+    verbose: VerboseOpt = 0,
+) -> None:
+    """Inspect runs/master.csv, the sheet that accumulates across jobs."""
+    from .output.master import master_path, preview
+    from .output.master import stats as sheet_stats
+    from .utils.logging import setup_logging
+
+    setup_logging(verbose)
+    settings = _load_settings(config)
+    sheet = master_path(settings.root, settings.config)
+    summary = sheet_stats(sheet, settings.config)
+
+    if not summary.exists:
+        console.print(
+            Panel(
+                f"No sheet yet at {sheet}.\n\n"
+                "One appears the first time a job finishes with --master on. The web console "
+                "turns it on for you; on the command line it is opt-in.",
+                title="master.csv",
+                border_style="blue",
+            )
+        )
+        raise typer.Exit(code=0)
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold", no_wrap=True)
+    grid.add_column(ratio=1)
+    grid.add_row("file", str(sheet))
+    grid.add_row("rows", f"{summary.rows:,}")
+    grid.add_row("jobs merged", str(summary.jobs))
+    if summary.first_added:
+        grid.add_row("first added", summary.first_added)
+        grid.add_row("last added", summary.last_added)
+    grid.add_row("size", f"{summary.bytes / 1024:.1f} KB")
+    grid.add_row(
+        "header",
+        "[green]haat's 19 columns[/green]"
+        if summary.header_ok
+        else "[red]NOT the haat header -- this file will not import[/red]",
+    )
+    console.print(Panel(grid, title="master.csv", border_style="blue"))
+
+    if preview_rows:
+        from .output.csv_writer import HAAT_COLUMNS
+
+        table = Table(show_header=True, header_style="bold", expand=True)
+        for name in ("title", "price_inr", "category_slug", "availability"):
+            table.add_column(name, overflow="fold")
+
+        shown = ("title", "price_inr", "category_slug", "availability")
+        wanted = [HAAT_COLUMNS.index(name) for name in shown]
+        for row in preview(sheet, settings.config, preview_rows):
+            table.add_row(*[row[i] if i < len(row) else "" for i in wanted])
+        console.print(table)
+
+    if push:
+        from .output.sheets import SheetsUnavailable
+        from .output.sheets import push as push_sheet
+
+        try:
+            pushed = push_sheet(sheet, settings)
+        except SheetsUnavailable as exc:
+            console.print(_error_panel(str(exc), "Google Sheets export"))
+            raise typer.Exit(code=2) from exc
+        console.print(
+            f"\n[green]Pushed {pushed.rows} row(s)[/green] to the {pushed.tab!r} tab.\n"
+            f"[dim]{pushed.url}[/dim]"
+        )
+
+    if not summary.header_ok:
+        raise typer.Exit(code=1)
+
+
+# --------------------------------------------------------------------------
+# profiles -- which rung each host answers on
+# --------------------------------------------------------------------------
+
+
+@app.command()
+def profiles(
+    clear: Annotated[
+        str | None,
+        typer.Option("--clear", help="Forget one host, or ALL to forget every one."),
+    ] = None,
+    config: ConfigOpt = None,
+    verbose: VerboseOpt = 0,
+) -> None:
+    """Show which fetch rung each host answers on, and forget any of them.
+
+    The ladder tries HTTP/2 first and falls back. A host that needed HTTP/1.1
+    once is started there next time, because a catalogue is almost always one
+    shop and paying the same failure 200 times is the whole cost of a ladder.
+
+    Visible and clearable on purpose: a mechanism that silently changes what the
+    tool does has to be one an operator can look at.
+    """
+    from .fetch.profiles import all_profiles, clear_profiles
+    from .utils.logging import setup_logging
+
+    setup_logging(verbose)
+    settings = _load_settings(config)
+
+    if clear is not None:
+        host = None if clear.upper() == "ALL" else clear
+        removed = clear_profiles(settings, host)
+        console.print(
+            f"Forgot {removed} host profile(s)."
+            if removed
+            else f"Nothing stored for {host or 'any host'}."
+        )
+        raise typer.Exit(code=0)
+
+    known = all_profiles(settings)
+    if not known:
+        console.print(
+            Panel(
+                "No host has needed anything other than HTTP/2 yet.\n\n"
+                "An entry appears here the first time a shop answers on a later rung. A stale "
+                "one can never break a working site -- starting later only skips rungs -- and "
+                "they age out after 30 days.",
+                title="fetch profiles",
+                border_style="blue",
+            )
+        )
+        raise typer.Exit(code=0)
+
+    table = Table(show_header=True, header_style="bold", expand=True)
+    table.add_column("host", ratio=2)
+    table.add_column("answers on", no_wrap=True)
+    for host, rung in known.items():
+        table.add_row(host, rung)
+    console.print(table)
+    console.print(
+        f"\n[dim]{len(known)} host(s). "
+        f"Forget one with:  haat-lister profiles --clear <host>[/dim]"
+    )
 
 
 @app.command()

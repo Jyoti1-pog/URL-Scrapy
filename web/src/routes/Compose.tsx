@@ -8,13 +8,20 @@
   The one setting that is NOT collapsed is provenance, and it has no default.
   An unexplained required field feels like bureaucracy; the sentence under it is
   what makes it feel like care instead.
+
+  The counts come from the server. They used to be computed here, which meant
+  two URL parsers, and the browser's one split on newlines -- so a
+  comma-separated paste of twelve links showed as one bad line. See
+  `useParsedLinks`.
 */
 
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, ApiError, type Config, type JobSettings, type Preflight } from "../api/client";
-import { countLines, humanRange } from "../lib/urls";
+import { api, ApiError, type Config, type JobSettings, type Parse, type Preflight } from "../api/client";
+import { humanRange } from "../lib/urls";
 import { useConfig } from "../hooks/useConfig";
+import { useParsedLinks } from "../hooks/useParsedLinks";
+import { ParsedLinks, UnparsedFragments } from "../components/ParsedLinks";
 import { PreflightPanel } from "../components/PreflightPanel";
 import { SettingsPanel } from "../components/SettingsPanel";
 
@@ -42,15 +49,11 @@ export function Compose() {
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showUnparsed, setShowUnparsed] = useState(false);
   const provenanceRef = useRef<HTMLFieldSetElement>(null);
 
-  const { lines, counts } = useMemo(() => countLines(text), [text]);
-  const flagged = useMemo(
-    () => new Map(lines.filter((l) => l.status !== "ok" && l.status !== "blank").map((l) => [l.line, l])),
-    [lines],
-  );
-
-  const ready = counts.unique > 0 && settings.provenance !== "";
+  const { parse, pending, error: parseError, checked } = useParsedLinks(text);
+  const ready = parse.unique > 0 && settings.provenance !== "";
 
   async function onPreflight() {
     if (!settings.provenance) {
@@ -93,8 +96,8 @@ export function Compose() {
     <div className="bench compose">
       <h1 className="screen-title">Product links</h1>
       <p className="lede">
-        One per line. Drop a <code>.txt</code> or <code>.csv</code>, or paste a column
-        straight out of a spreadsheet.
+        One per line, or separated by commas — however you have them. Drop a{" "}
+        <code>.txt</code> or <code>.csv</code>, or paste a column straight out of a spreadsheet.
       </p>
 
       <div className="compose-grid">
@@ -109,14 +112,34 @@ export function Compose() {
             onDragOver={(e) => e.preventDefault()}
             spellCheck={false}
             placeholder={EXAMPLE}
-            aria-label="Product links, one per line"
+            aria-label="Product links"
             rows={14}
           />
-          {flagged.size > 0 && <FlaggedLines flagged={[...flagged.values()]} />}
           {text.trim() === "" && <EmptyInvitation onUse={() => setText(EXAMPLE)} />}
+          <ParsedLinks
+            links={parse.links}
+            truncated={parse.truncated}
+            total={parse.pasted - parse.invalid}
+          />
+          <UnparsedFragments
+            fragments={parse.unparsed}
+            count={parse.invalid}
+            open={showUnparsed}
+            onToggle={setShowUnparsed}
+          />
+          {parseError && (
+            <p className="error" role="alert">
+              {parseError}
+            </p>
+          )}
         </div>
 
-        <Counter counts={counts} />
+        <Counter
+          parse={parse}
+          pending={pending}
+          checked={checked}
+          onShowUnparsed={() => setShowUnparsed(true)}
+        />
       </div>
 
       <fieldset className="provenance" ref={provenanceRef}>
@@ -177,8 +200,16 @@ export function Compose() {
           <button className="primary" onClick={onPreflight} disabled={!ready || busy}>
             {busy ? "Checking" : "Start processing"}
           </button>
-          {counts.unique === 0 && <span className="hint">Paste some links to begin.</span>}
-          {counts.unique > 0 && !settings.provenance && (
+          {!checked && (
+            <span className="hint is-failed">
+              Cannot reach the agent, so these links have not been checked. Start it with{" "}
+              <code>haat-lister serve</code>, then reload.
+            </span>
+          )}
+          {checked && parse.unique === 0 && (
+            <span className="hint">Paste some links to begin.</span>
+          )}
+          {checked && parse.unique > 0 && !settings.provenance && (
             <span className="hint">Choose who made this content.</span>
           )}
         </div>
@@ -202,40 +233,51 @@ function EmptyInvitation({ onUse }: { onUse: () => void }) {
   );
 }
 
-function Counter({ counts }: { counts: ReturnType<typeof countLines>["counts"] }) {
-  const rows: [string, number, string][] = [
-    ["pasted", counts.pasted, ""],
-    ["unique", counts.unique, "depth-high"],
-    ["duplicate", counts.duplicates, counts.duplicates ? "depth-low" : "depth-none"],
-    ["not a link", counts.invalid, counts.invalid ? "is-failed" : "depth-none"],
-  ];
+function Counter({
+  parse,
+  pending,
+  checked,
+  onShowUnparsed,
+}: {
+  parse: Parse;
+  pending: boolean;
+  checked?: boolean;
+  onShowUnparsed: () => void;
+}) {
+  // A dash, not a zero. See `useParsedLinks`.
+  const n = (value: number) => (checked === false ? "--" : value);
   return (
-    <dl className="counter" aria-live="polite">
-      {rows.map(([label, value, tone]) => (
-        <div key={label}>
-          <dt>{label}</dt>
-          <dd className={`mono ${tone}`}>{value}</dd>
-        </div>
-      ))}
+    <dl className={`counter${pending ? " is-pending" : ""}`} aria-live="polite" aria-busy={pending}>
+      <div>
+        <dt>pasted</dt>
+        <dd className="mono">{n(parse.pasted)}</dd>
+      </div>
+      <div>
+        <dt>unique</dt>
+        <dd className="mono depth-high">{n(parse.unique)}</dd>
+      </div>
+      <div>
+        <dt>duplicate</dt>
+        <dd className={`mono ${parse.duplicates ? "depth-low" : "depth-none"}`}>
+          {n(parse.duplicates)}
+        </dd>
+      </div>
+      <div>
+        <dt>not a link</dt>
+        <dd className="mono">
+          {/* Clickable, because it is the number someone will reach for when it
+              is not zero. A count with nowhere to go sends them hunting. */}
+          {checked === false ? (
+            <span className="depth-none">--</span>
+          ) : parse.invalid > 0 ? (
+            <button className="linkish is-failed" type="button" onClick={onShowUnparsed}>
+              {parse.invalid}
+            </button>
+          ) : (
+            <span className="depth-none">0</span>
+          )}
+        </dd>
+      </div>
     </dl>
-  );
-}
-
-function FlaggedLines({ flagged }: { flagged: { line: number; raw: string; status: string }[] }) {
-  // Marked in place, with the line number, so they can be fixed without
-  // leaving the screen. A count alone would send someone hunting.
-  return (
-    <ul className="flagged">
-      {flagged.slice(0, 6).map((line) => (
-        <li key={line.line}>
-          <span className="mono lineno">{line.line}</span>
-          <span className={line.status === "invalid" ? "is-failed" : "depth-low"}>
-            {line.status === "invalid" ? "not a link" : "same product as an earlier line"}
-          </span>
-          <span className="mono raw">{line.raw.slice(0, 64)}</span>
-        </li>
-      ))}
-      {flagged.length > 6 && <li className="more">and {flagged.length - 6} more</li>}
-    </ul>
   );
 }

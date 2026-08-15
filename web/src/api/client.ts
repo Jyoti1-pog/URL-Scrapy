@@ -31,12 +31,38 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
       headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     });
-  } catch {
+  } catch (err) {
+    // An aborted request is not a failure -- the live parse cancels the
+    // previous keystroke's call on every new one, and reporting those as "the
+    // agent isn't running" would make the box flash an error while you type.
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
     // A dead backend is a specific, fixable situation, and saying so beats
     // "Failed to fetch".
     throw new ApiError(0, "The agent isn't running.");
   }
 
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new ApiError(response.status, detailOf(body) ?? response.statusText);
+  }
+  return response.json() as Promise<T>;
+}
+
+/**
+ * The same thing for a file. A sibling of `request` rather than a flag on it:
+ * multipart needs the Content-Type header ABSENT so the browser can write the
+ * boundary into it, and `request` sets `application/json` unconditionally.
+ * Passing a FormData through there produces a body the server cannot parse and
+ * an error that says nothing about why.
+ */
+async function upload<T>(path: string, form: FormData): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(withToken(path), { method: "POST", body: form });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError(0, "The agent isn't running.");
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     throw new ApiError(response.status, detailOf(body) ?? response.statusText);
@@ -129,6 +155,215 @@ export interface InvalidUrl {
   reason: string;
 }
 
+export interface ParsedLink {
+  line: number;
+  original: string;
+  canonical: string;
+  host: string;
+  status: "ok" | "duplicate" | "invalid";
+  assumed_scheme: boolean;
+  note: string;
+}
+
+export interface Parse {
+  pasted: number;
+  unique: number;
+  duplicates: number;
+  invalid: number;
+  links: ParsedLink[];
+  unparsed: InvalidUrl[];
+  domains: Record<string, number>;
+  truncated: boolean;
+  summary: string;
+}
+
+export interface Sheet {
+  exists: boolean;
+  rows: number;
+  jobs: number;
+  first_added: string;
+  last_added: string;
+  bytes: number;
+  header_ok: boolean;
+  folder: string;
+  columns: string[];
+  preview: string[][];
+  preview_limit: number;
+  warnings: Finding[];
+}
+
+export interface MasterResult {
+  added: number;
+  replaced: number;
+  skipped: number;
+  total: number;
+  error: string;
+}
+
+/* --- Find photos -------------------------------------------------------- */
+
+export interface ParsedTable {
+  columns: string[];
+  url_column: string;
+  url_column_hits: number;
+  had_header: boolean;
+  delimiter: string;
+  found: number;
+  preview: string[];
+  extras_preview: Record<string, string>[];
+  unparsed: string[];
+}
+
+export interface FindRow {
+  index: number;
+  source_url: string;
+  title: string;
+  title_original: string;
+  primary_image_url: string;
+  image_urls: string[];
+  image_count: number;
+  width: number | null;
+  height: number | null;
+  method: string;
+  reason: string;
+  explanation: string;
+  price: string;
+  currency: string;
+  category: string;
+  description: string;
+  weight_g: number | null;
+  dimensions: string;
+  /** The operator's own CSV columns, carried through. */
+  extra: Record<string, string>;
+  failed: boolean;
+  from_cache: boolean;
+}
+
+export interface FindCreated {
+  find_id: string;
+  accepted: number;
+}
+
+export interface FindStart {
+  urls?: string[];
+  file_text?: string;
+  url_column?: string;
+  concurrency?: number;
+  use_cache?: boolean;
+}
+
+/* --- the "Why no photo?" report ---------------------------------------- */
+
+export interface DiagnoseAttempt {
+  rung: string;
+  transport: string;
+  outcome: string;
+  elapsed_ms: number;
+  ok: boolean;
+  detail: string;
+}
+
+export interface DiagnoseFetch {
+  ok: boolean;
+  status_code: number | null;
+  content_type: string;
+  bytes: number;
+  elapsed_ms: number;
+  final_url: string;
+  redirected: boolean;
+  robots_checked: boolean;
+  robots_allowed: boolean;
+  error_reason: string;
+  error_detail: string;
+  attempts: DiagnoseAttempt[];
+}
+
+/* §3.1. Three states, not two -- "not reached" is not a finding, and typing
+   these as booleans is what let the console render it as one. */
+export type Check = "yes" | "no" | "not reached";
+
+export interface DiagnoseShape {
+  evaluated: boolean;
+  looks_like_product: Check;
+  captcha: Check;
+  login_wall: Check;
+  unavailable: Check;
+  unavailable_in_buy_box: Check;
+  buy_box_found: Check;
+  thin: Check;
+  verdict: string;
+  evidence: string[];
+  product_signals: string[];
+}
+
+export interface DiagnoseStep {
+  predicate: number;
+  name: string;
+  outcome: string;
+  detail: string;
+}
+
+export interface DiagnoseCandidate {
+  index: number;
+  url: string;
+  rule: string;
+  source: string;
+  checked: boolean;
+  ok: boolean;
+  reason: string;
+  stopped_at: number | null;
+  width: number | null;
+  height: number | null;
+  content_type: string;
+  content_length: number | null;
+  steps: DiagnoseStep[];
+}
+
+export interface Diagnosis {
+  url: string;
+  elapsed_ms: number;
+  fetch: DiagnoseFetch;
+  shape: DiagnoseShape;
+  title: { value: string; source: string; confidence: string; note: string };
+  stage_b: {
+    enabled: boolean;
+    /* §3.3. Decided server-side so the CLI and the console cannot reach
+       different words about the same report. */
+    state: string;
+    triggers: string[];
+    attempted: boolean;
+    ok: boolean;
+    error: string;
+    gained: string[];
+    candidates_before: number;
+    candidates_after: number;
+  };
+  images: {
+    /* False when no page arrived. `kept 0 of 0` reads exactly like an empty
+       gallery, and one of those is a shop problem and the other is ours. */
+    collected: boolean;
+    rules: { rule: string; found: number }[];
+    raw_found: number;
+    dropped: { url: string; why: string }[];
+    candidates: DiagnoseCandidate[];
+    plugin_used: string;
+    plugin_replaced_candidates: boolean;
+    method: string;
+    winner: string;
+    reason: string;
+    explanation: string;
+  };
+  thresholds: {
+    min_width: number;
+    min_height: number;
+    min_bytes: number;
+    max_images_per_product: number;
+    hotlink_test: boolean;
+  };
+  structured_syntaxes: string[];
+  shape_enforced: boolean;
+}
+
 export interface Preflight {
   pasted: number;
   unique: number;
@@ -137,9 +372,20 @@ export interface Preflight {
   domains: Record<string, number>;
   robots_disallowed: string[];
   robots_checked: boolean;
+  /* §4.4. What these hosts DID last time, as against what robots.txt allows.
+     History, never law -- there is deliberately no field here that could
+     prevent the job, and the console must not invent one. */
+  observed: ObservedHost[];
   estimate_low_s: number;
   estimate_high_s: number;
   summary: string;
+}
+
+export interface ObservedHost {
+  host: string;
+  urls: number;
+  reason: string;
+  detail: string;
 }
 
 export interface JobCreated {
@@ -159,6 +405,10 @@ export interface JobRow {
   status: string;
   image_tier: string;
   reason: string;
+  /** §4.6's closed enum, and the sentence for it. Empty unless the row ended
+   *  with no photo. */
+  image_problem: string;
+  image_explanation: string;
   needs_human: boolean;
   missing: string[];
   /** One character per CSV column: 3 high, 2 medium, 1 low, 0 nothing,
@@ -184,6 +434,8 @@ export interface Job {
   processed: number;
   written: number;
   failed: number;
+  /** The site declined and stopping was correct. Never retried. */
+  refused: number;
   needs_human: number;
   running: boolean;
   queued: boolean;
@@ -194,6 +446,8 @@ export interface Job {
    *  of that, not of a copy this file forgot to update. */
   columns: string[];
   host_calls: number;
+  /** What this job did to the sheet. Null when master was off. */
+  master: MasterResult | null;
   pages_rendered: number;
   duration_s: number | null;
 }
@@ -253,9 +507,98 @@ export interface JobSummary {
 
 // -- calls ------------------------------------------------------------------
 
+/* --- §4: import, and §4.4: preflight ------------------------------------ */
+
+export interface ImportColumn {
+  index: number;
+  header: string;
+  samples: string[];
+  target: string;
+  confidence: number;
+  /** "" when unrecognised; otherwise the field it plainly is and we cannot write. */
+  known_unused: string;
+}
+
+export interface ImportInspect {
+  kind: "export" | "saved_page";
+  filename: string;
+  signature: string;
+  profile_used: string;
+  columns: ImportColumn[];
+  row_count: number;
+  /** Sent by the server so the console cannot offer a target it does not have. */
+  targets: string[];
+  source_url: string;
+}
+
+export interface ImportRun {
+  rows: {
+    source_url: string;
+    title: string;
+    status: string;
+    image_method: string;
+    no_image_reason: string;
+    notes: string[];
+  }[];
+  written: number;
+  needs_human: number;
+  failed: number;
+  profile_saved: string;
+}
+
 export const api = {
   health: () => request<Health>("/api/health"),
   config: () => request<Config>("/api/config"),
+
+  sheet: () => request<Sheet>("/api/sheet"),
+
+  parseFindFile: (text: string, url_column?: string) =>
+    request<ParsedTable>("/api/find/parse-file", {
+      method: "POST",
+      body: JSON.stringify({ text, url_column: url_column ?? "" }),
+    }),
+
+  startFind: (body: FindStart) =>
+    request<FindCreated>("/api/find", { method: "POST", body: JSON.stringify(body) }),
+
+  cancelFind: (id: string) => request<unknown>(`/api/find/${id}/cancel`, { method: "POST" }),
+
+  findStream: (id: string) => new EventSource(withToken(`/api/find/${id}/stream`)),
+
+  findDownloadUrl: (id: string) => withToken(`/api/find/${id}/download`),
+
+  diagnose: (url: string) => request<Diagnosis>(`/api/diagnose?url=${encodeURIComponent(url)}`),
+
+  inspectImport: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return upload<ImportInspect>("/api/import/inspect", form);
+  },
+
+  runImport: (opts: {
+    file: File;
+    provenance: string;
+    mapping?: Record<string, string>;
+    source_url?: string;
+    save_profile?: string;
+  }) => {
+    const form = new FormData();
+    form.append("file", opts.file);
+    // Required by the server's signature, not by a check it could forget.
+    form.append("provenance", opts.provenance);
+    if (opts.mapping) form.append("mapping", JSON.stringify(opts.mapping));
+    if (opts.source_url) form.append("source_url", opts.source_url);
+    if (opts.save_profile) form.append("save_profile", opts.save_profile);
+    return upload<ImportRun>("/api/import/run", form);
+  },
+
+
+  parse: (urls: string[], signal?: AbortSignal) =>
+    request<Parse>("/api/jobs/parse", {
+      method: "POST",
+      body: JSON.stringify({ urls }),
+      signal,
+    }),
 
   preflight: (urls: string[], settings: JobSettings) =>
     request<Preflight>("/api/jobs/preflight", {

@@ -119,6 +119,14 @@ class JobSettingsIn(BaseModel):
     ignore_robots: bool = False
 
 
+class UrlsIn(BaseModel):
+    """Just the paste. The parse preview needs no settings, and asking for a
+    provenance to count links would teach an operator that the field is
+    decorative -- it is the one thing this tool refuses to assume."""
+
+    urls: list[str]
+
+
 class JobCreateIn(BaseModel):
     urls: list[str]
     settings: JobSettingsIn
@@ -128,6 +136,49 @@ class InvalidUrlOut(BaseModel):
     line: int
     raw: str
     reason: str
+
+
+# How many links the parse preview sends back. The counts are always exact; the
+# list is capped because a 5,000-link paste re-serialised on every keystroke is
+# a megabyte of JSON to render a list nobody scrolls to the end of.
+PREVIEW_LIMIT = 250
+UNPARSED_LIMIT = 100
+
+
+class ParsedLinkOut(BaseModel):
+    """One link the operator pasted, as the server understands it.
+
+    Carries BOTH forms. `canonical` is what dedupe keyed on and what the row
+    will be; `original` is what they typed and the only one they will recognise
+    when scanning the list for the one they got wrong.
+    """
+
+    line: int
+    original: str
+    canonical: str
+    host: str
+    status: str  # ok | duplicate | invalid
+    assumed_scheme: bool = False
+    note: str = ""
+
+
+class ParseOut(BaseModel):
+    """The live preview under the textarea. No network call of any kind.
+
+    Served from `plan_urls` rather than parsed in the browser, because the
+    console showing a count the run does not honour is worse than no count.
+    """
+
+    pasted: int
+    unique: int
+    duplicates: int
+    invalid: int
+    links: list[ParsedLinkOut] = Field(default_factory=list)
+    unparsed: list[InvalidUrlOut] = Field(default_factory=list)
+    domains: dict[str, int] = Field(default_factory=dict)
+    # True when `links` is a prefix rather than the whole list.
+    truncated: bool = False
+    summary: str = ""
 
 
 class PreflightOut(BaseModel):
@@ -151,6 +202,25 @@ class PreflightOut(BaseModel):
     estimate_low_s: int
     estimate_high_s: int
     summary: str
+    # v5 §4.4. What these hosts DID last time, as against what robots.txt says
+    # they allow. History, never law: nothing in here prevents the job, and
+    # there is deliberately no field in this response that could.
+    observed: list[ObservedHostOut] = Field(default_factory=list)
+
+
+class ObservedHostOut(BaseModel):
+    """A host that refused a previous run, and how long ago.
+
+    Reported so the operator hears it at second zero rather than minute four.
+    An observation goes stale -- a site that rate-limited us on a Monday is not
+    a site we may never speak to again -- so entries expire, and the wording is
+    written to say "it may have changed its mind" rather than "do not bother".
+    """
+
+    host: str
+    urls: int
+    reason: str
+    detail: str
 
 
 class JobCreatedOut(BaseModel):
@@ -170,6 +240,11 @@ class RowOut(BaseModel):
     status: str = ""
     image_tier: str = ""
     reason: str = ""
+    # §4.6's closed enum, plus the sentence for it. Sent together so the console
+    # can group on the word and show the explanation without a second lookup
+    # table that would drift from `images/reasons.py`.
+    image_problem: str = ""
+    image_explanation: str = ""
     # The same test review.csv applies, not `status == needs_review`. A row can
     # be status=ok and still need a human -- a blank price is expected, not
     # surprising, so nothing flags it, but it is still the thing an operator has
@@ -205,8 +280,21 @@ class JobOut(BaseModel):
     counts: dict[str, int]
     total: int
     processed: int
+    # One of §1.1's four terminal states: rows that came out clean. Disjoint
+    # from `needs_human`, `refused` and `failed`, so the four sum to
+    # `processed` and a header can print them side by side.
     written: int
+    # How many rows are in listings.csv -- `written` PLUS `needs_human`, since
+    # a row that needs a human is still written and review.csv points into it
+    # rather than replacing it. Two fields because they answer two questions;
+    # one field answering both is what made a four-row job report
+    # "4 written | 4 need a human".
+    in_listings: int = 0
     failed: int
+    # The site declined and stopping was correct. Separate from `failed` so the
+    # header can say so and the retry button can exclude them: retrying a
+    # refusal produces the same refusal forever.
+    refused: int = 0
     needs_human: int
     running: bool
     queued: bool
@@ -221,6 +309,8 @@ class JobOut(BaseModel):
     host_calls: int = 0
     pages_rendered: int = 0
     duration_s: float | None = None
+    # What this job did to runs/master.csv. None when the sheet was off.
+    master: MasterOut | None = None
 
 
 class JobSummaryOut(BaseModel):
@@ -296,3 +386,130 @@ class ExportOut(BaseModel):
     rows: int
     edits_applied: int
     rows_edited: int
+
+
+# ---------------------------------------------------------------------------
+# The sheet
+# ---------------------------------------------------------------------------
+
+
+class SheetOut(BaseModel):
+    """runs/master.csv, as the Sheet screen needs it.
+
+    `preview` is rows of plain strings in `columns` order -- the same nineteen
+    the CSV has. Sent as a matrix rather than as objects because that is what it
+    is: this screen shows the file, not a model of it.
+    """
+
+    exists: bool = False
+    rows: int = 0
+    jobs: int = 0
+    first_added: str = ""
+    last_added: str = ""
+    bytes: int = 0
+    header_ok: bool = False
+    folder: str = ""
+    columns: list[str] = Field(default_factory=list)
+    preview: list[list[str]] = Field(default_factory=list)
+    preview_limit: int = 0
+    # The same findings /api/health carries. Repeated here rather than linked
+    # because this is the screen an operator looks at while deciding whether the
+    # sheet is ready to upload, and "14 subcategory slugs are unconfirmed" is a
+    # fact about the rows in it.
+    warnings: list[FindingOut] = Field(default_factory=list)
+
+
+class MasterOut(BaseModel):
+    """What a finished job did to the sheet. Absent when master was off for the
+    run -- no object rather than a zeroed one, so "off" and "added nothing"
+    cannot be confused."""
+
+    added: int = 0
+    replaced: int = 0
+    skipped: int = 0
+    total: int = 0
+    error: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Find photos
+# ---------------------------------------------------------------------------
+
+
+class FindStartIn(BaseModel):
+    """Either a paste or an uploaded file, never both meaningfully.
+
+    No provenance: a find writes nothing and publishes nothing, so there is no
+    content whose ownership matters yet. The question is asked at Compose, where
+    it decides something.
+    """
+
+    urls: list[str] = Field(default_factory=list)
+    file_text: str = ""
+    url_column: str = ""
+    concurrency: int = Field(default=4, ge=1, le=20)
+    ignore_robots: bool = False
+    render: bool | None = None
+    # Off lets an operator force a fresh look at a shop that has changed.
+    use_cache: bool = True
+
+
+class ParsedTableOut(BaseModel):
+    """What we made of an uploaded CSV, before anything is fetched."""
+
+    columns: list[str] = Field(default_factory=list)
+    url_column: str = ""
+    url_column_hits: int = 0
+    had_header: bool = True
+    delimiter: str = ","
+    found: int = 0
+    preview: list[str] = Field(default_factory=list)
+    extras_preview: list[dict[str, str]] = Field(default_factory=list)
+    unparsed: list[str] = Field(default_factory=list)
+
+
+class FindCreatedOut(BaseModel):
+    find_id: str
+    accepted: int
+
+
+class FindRowOut(BaseModel):
+    index: int
+    source_url: str
+    title: str = ""
+    title_original: str = ""
+    primary_image_url: str = ""
+    image_urls: list[str] = Field(default_factory=list)
+    image_count: int = 0
+    width: int | None = None
+    height: int | None = None
+    method: str = "none"
+    reason: str = ""
+    explanation: str = ""
+    price: str = ""
+    currency: str = ""
+    category: str = ""
+    description: str = ""
+    weight_g: int | None = None
+    dimensions: str = ""
+    # The operator's own columns, carried through from their CSV.
+    extra: dict[str, str] = Field(default_factory=dict)
+    failed: bool = False
+    from_cache: bool = False
+
+
+class FindOut(BaseModel):
+    find_id: str
+    total: int
+    running: bool
+    extra_columns: list[str] = Field(default_factory=list)
+    rows: list[FindRowOut] = Field(default_factory=list)
+    done: int = 0
+    with_photo: int = 0
+    without_photo: int = 0
+    low_res: int = 0
+    failed: int = 0
+    from_cache: int = 0
+    # Always zero, and shown so it is visibly always zero. A preview that cost
+    # money would be a preview nobody could trust.
+    host_calls: int = 0

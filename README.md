@@ -14,6 +14,27 @@ a dimension, an HS code or a GI region.
 
 ---
 
+## What this tool is for
+
+Moving **your own** catalogue onto haat. A seller with two hundred products on
+their own storefront, or on a marketplace they already sell through, who does
+not want to retype them.
+
+That constraint is not a formality. haat's seller rules require products made in
+India by the seller and prohibit resold or dropshipped goods; product
+photographs and marketing copy belong to whoever created them. So this tool will
+happily read any product page you point it at — and a listing built from someone
+else's page will not survive haat's own review, however clean the CSV is. That
+is why `--provenance` is required and has no default: whether you made the thing
+is a fact only you know, and it is the one question the tool refuses to answer
+for you.
+
+If you are pointing it at a page you do not own to see what it does, that is
+fine. Just know which of those two things you are doing before you paste five
+hundred links.
+
+---
+
 ## Five minutes from clone to CSV
 
 ```bash
@@ -27,6 +48,35 @@ haat-lister serve
 
 That opens `http://127.0.0.1:8000`. Paste product links, say who made them, press
 one button, download the CSV. No terminal needed after that first command.
+
+Four screens:
+
+| | |
+|---|---|
+| **Compose** | paste links, choose provenance, run |
+| **Sheet** | `runs/master.csv` — everything every finished job produced, deduped |
+| **Jobs** | what you have run, and its files |
+| **Find photos** | every photo for every product, *before* committing to a run |
+
+**Find photos** is the one worth knowing about. Paste a catalogue or upload a
+CSV — it detects which column holds the links and carries your SKU column
+through — and it tells you which products have a usable photo, which are too
+small, and which shops refuse us. It writes nothing, publishes nothing, and
+never contacts an image host, so it costs you a look and nothing else. What it
+learns is cached, so the real run afterwards does not re-fetch the same shops.
+
+### The two CSVs
+
+haat's import template is nineteen columns and none of them is an image, so
+every run produces two files:
+
+```
+listings.csv               19 columns  →  upload this to haat
+listings_with_images.csv   + every photo URL, size, and method  →  for your records
+```
+
+They are written from the same rows in the same order, and a test asserts they
+line up. The same pair accumulates as `master.csv` and `master_with_images.csv`.
 
 The console ships **built**, so a machine with no Node still runs it. `config-check`
 runs on the page and tells you what is missing before you spend a request.

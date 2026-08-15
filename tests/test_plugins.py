@@ -33,6 +33,9 @@ from haat_lister.models import (
 )
 from haat_lister.pipeline import new_record, process_url
 
+# Every plugin that ships with the tool and loads on every run.
+BUILTIN_NAMES = {"example_shopify", "amazon"}
+
 PAGE_URL = "https://shop.example/products/kurta"
 
 BARE_HTML = """<!doctype html><html><head><title>Kurta | MyShop</title></head>
@@ -393,7 +396,10 @@ def test_operator_plugins_are_ordered_ahead_of_builtins(
 
 def test_an_unset_plugins_dir_loads_nothing_from_disk(settings: Settings) -> None:
     registry = build_registry(settings.config, settings.root)
-    assert [p.name for p in registry.plugins] == ["example_shopify"]
+    # The built-ins, whatever order they were imported in. Asserted as a set
+    # so adding one (amazon, in the v3 fix pass) is not a test failure while
+    # "nothing was loaded from disk" still is.
+    assert {p.name for p in registry.plugins} == BUILTIN_NAMES
 
 
 def test_a_plugin_file_that_fails_to_import_is_skipped(settings: Settings, tmp_path) -> None:
@@ -405,7 +411,10 @@ def test_a_plugin_file_that_fails_to_import_is_skipped(settings: Settings, tmp_p
     tuned.config.extraction.plugins_dir = "plugins"
     registry = build_registry(tuned.config, tmp_path)
 
-    assert [p.name for p in registry.plugins] == ["example_shopify"]
+    # The built-ins, whatever order they were imported in. Asserted as a set
+    # so adding one (amazon, in the v3 fix pass) is not a test failure while
+    # "nothing was loaded from disk" still is.
+    assert {p.name for p in registry.plugins} == BUILTIN_NAMES
 
 
 # --------------------------------------------------------------------------

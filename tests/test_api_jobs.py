@@ -306,7 +306,11 @@ def test_page_refresh_reconstructs_job_state(client: TestClient) -> None:
     assert state["job_id"] == job_id
     assert state["state"] == "done"
     assert state["total"] == 6
-    assert state["written"] == 6
+    # `in_listings`, not `written`: the question here is how many rows the file
+    # has, and those two differ by exactly the rows that need a human. `written`
+    # is one of §1.1's four disjoint terminal states.
+    assert state["in_listings"] == 6
+    assert state["written"] + state["needs_human"] == state["in_listings"]
     assert len(state["rows"]) == 6
     assert [r["input_index"] for r in state["rows"]] == list(range(6))
     assert all(r["outcome"] for r in state["rows"])
@@ -405,7 +409,7 @@ def test_cancel_preserves_completed_rows(client: TestClient, job_settings: Setti
     assert listings.exists()
 
     rows = listings.read_text(encoding="utf-8").splitlines()
-    assert len(rows) - 1 == state["written"] >= 1, "a cancel threw away finished rows"
+    assert len(rows) - 1 == state["in_listings"] >= 1, "a cancel threw away finished rows"
 
 
 def test_cancelling_a_finished_job_is_a_409(client: TestClient) -> None:

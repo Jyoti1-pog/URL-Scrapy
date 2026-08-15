@@ -306,11 +306,19 @@ def test_one_crashing_row_does_not_end_the_batch(batch_settings: Settings) -> No
     assert stats.written == 4
     assert stats.failed == 1
 
-    review = job_paths(batch_settings, stats.job_id).review
-    with review.open("r", encoding="utf-8", newline="") as handle:
-        crashed = [r for r in csv.DictReader(handle) if r["status"] == RowStatus.FAILED.value]
+    # v5 §1.3: the crashed row is in failed.csv and NOT in review.csv. It used
+    # to be in both, which is how three inputs produced six output rows. There
+    # is nothing on a crashed row for a human to decide -- the reason is the
+    # whole story, and failed.csv is the file an operator re-runs.
+    paths = job_paths(batch_settings, stats.job_id)
+
+    with paths.review.open("r", encoding="utf-8", newline="") as handle:
+        assert [r for r in csv.DictReader(handle) if r["status"] == RowStatus.FAILED.value] == []
+
+    with paths.failed.open("r", encoding="utf-8", newline="") as handle:
+        crashed = list(csv.DictReader(handle))
     assert len(crashed) == 1
-    assert "crashed the pipeline" in crashed[0]["notes"]
+    assert crashed[0]["class"] == "failed", "a crash is our problem, not a refusal"
 
 
 def test_a_crashed_row_is_still_in_the_ledger(batch_settings: Settings) -> None:

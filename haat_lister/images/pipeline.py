@@ -37,6 +37,7 @@ from ..utils.logging import get_logger
 from .downloader import download_candidates
 from .hosts.base import ImageHost
 from .optimiser import OptimiseError, optimise
+from .reasons import NoImageReason, explain
 from .validator import Tier1Validator, validate_all_candidates
 
 log = get_logger(__name__)
@@ -55,6 +56,77 @@ def _content_hash(path: Path) -> str:
 def _summarise(results: list[ValidationResult]) -> str:
     """The failing predicates, so `image_reason` always names WHY we paid for Tier 2."""
     return ",".join(f"{r.reason}" for r in results if not r.ok) or "no_candidates"
+
+
+def _no_image(result: ImageResult, reason: NoImageReason, detail: str) -> ImageResult:
+    """Finish a row with no photo, naming why in one word and in full.
+
+    Every `method = NONE` in this module goes through here. That is the whole
+    mechanism behind §4.6's never-silent rule: there is no way to set NONE
+    without also setting the enum, so a new failure path cannot be added that
+    forgets to say what happened. A test asserts the pairing across every path.
+    """
+    result.method = ImageMethod.NONE
+    result.none_reason = reason
+    result.reason = detail
+    return result
+
+
+def _best_low_res(results: list[ValidationResult]) -> ValidationResult | None:
+    """The largest photo that failed ONLY on being under the listable standard.
+
+    "Reject everything, ship nothing" is the wrong failure mode for a standard.
+    An operator holding a 679x679 photo and a flag saying so can decide whether
+    to use it, shoot a new one, or leave the row; an operator holding nothing
+    cannot. So the standard does not move -- the FAILURE MODE does.
+
+    Deliberately narrow. `unusably_small` is a separate predicate reason and is
+    not eligible, and neither is anything that failed for any other cause: a URL
+    that 404s or serves HTML is not a small photo, it is not a photo.
+    """
+    eligible = [
+        r for r in results if r.reason == "below_min_dimensions" and r.width and r.height
+    ]
+    if not eligible:
+        return None
+    return max(eligible, key=lambda r: (r.width or 0) * (r.height or 0))
+
+
+def _flag_low_res(
+    record: ProductRecord, width: int | None, height: int | None, settings: Settings
+) -> None:
+    """Say the size out loud. A flag reading "small" is not a decision anyone
+    can make; "679x679, standard is 800x800" is."""
+    cfg = settings.config.validator
+    record.flag(
+        f"The best photo on this page is {width}x{height}, below haat's {cfg.min_width}x"
+        f"{cfg.min_height} standard. It has been used so the row is not empty -- replace it "
+        f"with a larger shot before importing if you can."
+    )
+
+
+def _low_res_direct(
+    result: ImageResult, record: ProductRecord, best: ValidationResult, summary: str
+) -> ImageResult:
+    result.url = best.url
+    result.method = ImageMethod.DIRECT_LOW_RES
+    result.reason = f"below_standard:{best.width}x{best.height} (others: {summary})"
+    record.flag(
+        f"The best photo on this page is {best.width}x{best.height}, below haat's standard. "
+        f"It has been used so the row is not empty -- replace it with a larger shot before "
+        f"importing if you can."
+    )
+    return result
+
+
+def _candidate_reason(candidates: list[str], fallback: NoImageReason) -> NoImageReason:
+    """No candidates at all is a different problem from candidates that failed.
+
+    The first sends an operator to look at the page or write a plugin; the
+    second sends them to look at the photos. Collapsing the two was most of what
+    made `image: none` unactionable.
+    """
+    return NoImageReason.NO_IMAGE_CANDIDATES if not candidates else fallback
 
 
 class ImageResolver:
@@ -107,14 +179,27 @@ class ImageResolver:
                 winner.url,
             )
 
+        # A photo that failed ONLY on being under the listable standard, and is
+        # still above the unusable floor. Not a Tier-1 pass -- it is below the
+        # standard and the row will say so -- but a real, fetchable photo, and
+        # shipping it flagged beats shipping nothing.
+        low_res = None if tier1_passed else _best_low_res(results)
+
         # ------------------------------------------------------------------
         # THE GATE (Rule 1). Read this before changing anything below it.
         # ------------------------------------------------------------------
-        do_download = need_file or (need_url and not tier1_passed)
-        do_upload = need_url and not tier1_passed
+        #
+        # `low_res` appears here in one direction only: it can stop an upload,
+        # never start one. A usable-if-small direct URL means there is nothing
+        # to pay a host for, so both flags can only move towards False.
+        do_download = need_file or (need_url and not tier1_passed and low_res is None)
+        do_upload = need_url and not tier1_passed and low_res is None
 
         assert not (do_upload and tier1_passed), (
             "Tier 2 upload reached with a valid Tier-1 URL"
+        )
+        assert not (do_upload and low_res is not None), (
+            "Tier 2 upload reached with a usable low-resolution URL in hand"
         )
 
         result = ImageResult(
@@ -132,10 +217,15 @@ class ImageResolver:
             result.reason = "direct_ok"
             return result
 
+        if low_res is not None and not do_download:
+            return _low_res_direct(result, record, low_res, _summarise(results))
+
         if not do_download:
-            result.method = ImageMethod.NONE
-            result.reason = f"direct_failed:{_summarise(results)}"
-            return result
+            return _no_image(
+                result,
+                _candidate_reason(candidates, NoImageReason.ALL_CANDIDATES_REJECTED),
+                f"direct_failed:{_summarise(results)}",
+            )
 
         # ------------------------------------------------------------------
         # TIER 2a + 2b -- download and normalise.
@@ -154,11 +244,22 @@ class ImageResolver:
 
         if not do_upload:
             # manifest mode: local files ARE the deliverable.
-            result.method = ImageMethod.LOCAL if files else ImageMethod.NONE
-            result.reason = (
-                f"local_only:{_summarise(results)}" if files else f"no_image:{_summarise(results)}"
+            if files:
+                small = all(f.low_res for f in files)
+                result.method = ImageMethod.LOCAL_LOW_RES if small else ImageMethod.LOCAL
+                result.reason = f"local_only:{_summarise(results)}"
+                if small:
+                    _flag_low_res(record, files[0].width, files[0].height, self._settings)
+                return result
+            if low_res is not None:
+                # The bytes could not be kept, but the URL is still live and
+                # still a photo. Better than an empty column.
+                return _low_res_direct(result, record, low_res, _summarise(results))
+            return _no_image(
+                result,
+                _candidate_reason(candidates, NoImageReason.ALL_CANDIDATES_REJECTED),
+                f"no_image:{_summarise(results)}",
             )
-            return result
 
         # ------------------------------------------------------------------
         # TIER 2c/2d -- gated, last resort. Adapters arrive in Phase 8.
@@ -192,26 +293,32 @@ class ImageResolver:
                 record.note(f"Image {source.source_url} was dropped: {exc.reason}.")
                 continue
 
-            # The same floor Tier 1 applies to direct URLs. A candidate whose
-            # size only becomes visible after decoding would otherwise slip a
-            # thumbnail into the deliverables, and haat is a premium marketplace.
+            # The same two floors Tier 1 applies to direct URLs. Below the
+            # hard floor the file is genuinely unusable and is deleted; between
+            # the two it is kept and marked, because a small photo an operator
+            # can see and replace beats an empty row they have to investigate.
             if (
-                optimised.width < cfg.validator.min_width
-                or optimised.height < cfg.validator.min_height
+                optimised.width < cfg.validator.hard_min_width
+                or optimised.height < cfg.validator.hard_min_height
             ):
                 log.debug(
-                    "Dropping %s: %dx%d is below the listable minimum",
+                    "Dropping %s: %dx%d is unusably small",
                     source.source_url,
                     optimised.width,
                     optimised.height,
                 )
                 record.note(
                     f"Image {source.source_url} was dropped: {optimised.width}x"
-                    f"{optimised.height} is below the {cfg.validator.min_width}x"
-                    f"{cfg.validator.min_height} minimum for a listable photo."
+                    f"{optimised.height} is below the {cfg.validator.hard_min_width}x"
+                    f"{cfg.validator.hard_min_height} floor for a usable photo."
                 )
                 optimised.path.unlink(missing_ok=True)
                 continue
+
+            low_res = (
+                optimised.width < cfg.validator.min_width
+                or optimised.height < cfg.validator.min_height
+            )
 
             files.append(
                 ImageFile(
@@ -221,6 +328,7 @@ class ImageResolver:
                     bytes=optimised.bytes,
                     width=optimised.width,
                     height=optimised.height,
+                    low_res=low_res,
                 )
             )
 
@@ -246,8 +354,11 @@ class ImageResolver:
         if not hosting_allowed(record.provenance):
             # Rule 2.2: re-uploading photographs the operator does not own would
             # be us making a copy of someone else's work on their behalf.
-            result.method = ImageMethod.NONE
-            result.reason = f"direct_failed:{reasons} -> hosting_blocked:third_party_provenance"
+            _no_image(
+                result,
+                NoImageReason.HOSTING_BLOCKED,
+                f"direct_failed:{reasons} -> hosting_blocked:third_party_provenance",
+            )
             record.flag(
                 "Tier 1 failed and provenance is third-party, so the image was not re-hosted. "
                 "This row has no image URL."
@@ -255,13 +366,17 @@ class ImageResolver:
             return result
 
         if not files or not self._hosts:
-            result.method = ImageMethod.NONE
-            result.reason = (
-                f"direct_failed:{reasons} -> no_host_configured"
-                if files
-                else f"direct_failed:{reasons} -> nothing_downloaded"
+            if files:
+                return _no_image(
+                    result,
+                    NoImageReason.HOST_UPLOAD_FAILED,
+                    f"direct_failed:{reasons} -> no_host_configured",
+                )
+            return _no_image(
+                result,
+                _candidate_reason(record.image_candidates, NoImageReason.ALL_CANDIDATES_REJECTED),
+                f"direct_failed:{reasons} -> nothing_downloaded",
             )
-            return result
 
         hero = files[0]
         hero_path = self._settings.root / hero.local_path
@@ -320,10 +435,12 @@ class ImageResolver:
             return result
 
         # TIER 3 -- every host failed. Never fabricate a URL.
-        result.method = ImageMethod.NONE
         result.upload_used = True
-        result.reason = f"direct_failed:{reasons} -> all_hosts_failed:{','.join(host_failures)}"
-        return result
+        return _no_image(
+            result,
+            NoImageReason.HOST_UPLOAD_FAILED,
+            f"direct_failed:{reasons} -> all_hosts_failed:{','.join(host_failures)}",
+        )
 
 
 def apply_to_record(record: ProductRecord, result: ImageResult) -> None:
@@ -331,9 +448,14 @@ def apply_to_record(record: ProductRecord, result: ImageResult) -> None:
     record.image = result
 
     if result.method is ImageMethod.NONE:
+        assert result.none_reason is not None, (
+            "a row finished with no image and no reason -- see _no_image"
+        )
+        # The plain sentence, not the predicate soup. `image_reason` in
+        # review.csv still carries the detail for whoever wants it.
         record.flag(
-            f"No usable image for this listing ({result.reason}). haat requires at least one "
-            "photo, so add one by hand before importing."
+            f"{explain(result.none_reason)} haat requires at least one photo, so add one by "
+            "hand before importing."
         )
     elif result.method is ImageMethod.HOSTED and record.provenance is Provenance.THIRD_PARTY:
         raise AssertionError("hosted image produced for a third-party row")

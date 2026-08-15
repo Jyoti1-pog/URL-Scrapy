@@ -153,38 +153,123 @@ main {
   font-size: var(--size-15);
 }
 
-.flagged {
-  list-style: none;
-  margin: var(--gap-tight) 0 0;
-  padding: 0;
-  font-size: var(--size-12);
+/* The counter dims rather than moves while a parse is in flight. A spinner
+   here would draw the eye to the one part of the screen that is about to
+   change by itself anyway. */
+.counter.is-pending dd {
+  opacity: 0.55;
+  transition: opacity 120ms ease-out;
 }
 
-.flagged li {
+.counter dd button.linkish {
+  font-size: var(--size-15);
+  font-family: var(--font-mono);
+}
+
+/* --- the parse, disclosed ------------------------------------------------ */
+
+.parsed {
+  margin-top: var(--gap-tight);
+  font-size: var(--size-12);
+  border-top: 1px solid var(--rule);
+}
+
+.parsed > summary {
+  padding: var(--gap-hair) 0;
+  cursor: pointer;
+  color: var(--dye-3);
+}
+
+.parsed > summary:hover {
+  color: var(--ink);
+}
+
+.parsed.unparsed > summary {
+  color: var(--madder);
+}
+
+.parsed .why {
+  margin: var(--gap-hair) 0;
+  color: var(--dye-2);
+}
+
+.parsed-list {
+  list-style: none;
+  margin: 0 0 var(--gap-tight);
+  padding: 0;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+.parsed-list li {
   display: grid;
-  grid-template-columns: 2.5rem 12rem 1fr;
+  grid-template-columns: 2.5rem 1fr auto;
   gap: var(--gap-tight);
+  align-items: baseline;
   padding: 2px 0;
   border-bottom: 1px dotted var(--rule);
 }
 
-.flagged .lineno {
+.parsed-list .lineno {
   color: var(--dye-2);
   text-align: right;
 }
 
-.flagged .raw {
-  color: var(--dye-2);
+.parsed-url {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.parsed-url .canonical,
+.parsed-list .raw {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.flagged .more {
+/* The pasted form, when canonicalisation changed it. Smaller and quieter: it
+   is there so an operator recognises their own link, not to be read. */
+.parsed-url .original {
+  color: var(--dye-2);
+  font-size: var(--size-11);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Struck through, not hidden. A duplicate that vanishes looks like a link that
+   was lost. */
+.parsed-list li.dupe .canonical {
+  text-decoration: line-through;
+  color: var(--dye-2);
+}
+
+.parsed-marks {
+  display: flex;
+  gap: var(--gap-hair);
+  white-space: nowrap;
+}
+
+.mark {
+  font-size: var(--size-11);
+  padding: 0 var(--gap-hair);
+  border: 1px solid var(--rule);
+}
+
+.mark.assumed {
+  color: var(--brass);
+  border-color: var(--brass);
+}
+
+.mark.dupe-mark {
+  color: var(--dye-2);
+}
+
+.parsed .more {
   display: block;
   color: var(--dye-2);
-  border: 0;
-  padding-top: var(--gap-hair);
+  padding-bottom: var(--gap-hair);
 }
 
 /* -- provenance: the one required control, and the one that gets a reason -- */
@@ -1165,4 +1250,605 @@ button.linkish:hover {
 .history .files a {
   margin-right: var(--gap);
   font-size: var(--size-12);
+}
+
+/* --------------------------------------------------------------------------
+   Why no photo? — the diagnose report
+
+   Reads top to bottom as the run happened: what was fetched, what kind of page
+   it turned out to be, where photos were looked for, then each photo with the
+   check that stopped it. No cards; the sections are separated by rules, like
+   everything else here.
+   -------------------------------------------------------------------------- */
+
+.diagnose-form {
+  margin-bottom: var(--gap-wide);
+}
+
+.diagnose-form label {
+  display: block;
+  font-size: var(--size-12);
+  color: var(--dye-2);
+  margin-bottom: var(--gap-hair);
+}
+
+.diagnose-form .row {
+  display: flex;
+  gap: var(--gap-tight);
+}
+
+.diagnose-form input {
+  flex: 1;
+  font-size: var(--size-13);
+  color: var(--ink);
+  background: var(--resist);
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  padding: var(--gap-tight) var(--gap);
+}
+
+.report section {
+  margin-top: var(--gap-wide);
+  padding-top: var(--gap);
+  border-top: 1px solid var(--rule);
+}
+
+.report h2 {
+  font-size: var(--size-15);
+  font-weight: 500;
+  margin: 0 0 var(--gap-tight);
+}
+
+/* The answer, first and once. Everything below it is the evidence. */
+.verdict {
+  padding: var(--gap) var(--gap-wide);
+  border-left: 3px solid;
+  background: var(--resist);
+}
+
+.verdict-ok {
+  border-color: var(--dye-3);
+}
+
+.verdict-none {
+  border-color: var(--madder);
+}
+
+.verdict-line {
+  margin: 0;
+  font-size: var(--size-15);
+}
+
+.verdict-word {
+  font-weight: 500;
+}
+
+.verdict-none .verdict-word {
+  color: var(--madder);
+}
+
+.verdict-url {
+  color: var(--dye-2);
+  font-size: var(--size-12);
+  word-break: break-all;
+}
+
+.verdict-why {
+  margin: var(--gap-tight) 0 0;
+  font-size: var(--size-13);
+  max-width: 52rem;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: 14rem 1fr;
+  gap: var(--gap-hair) var(--gap);
+  margin: 0;
+  font-size: var(--size-12);
+}
+
+.facts dt {
+  color: var(--dye-2);
+}
+
+.facts dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.evidence {
+  list-style: none;
+  margin: var(--gap-tight) 0 0;
+  padding: 0;
+  font-size: var(--size-11);
+  color: var(--madder);
+}
+
+/* Where photos were looked for. A rule that found nothing is the interesting
+   row, so it is present and dimmed rather than absent. */
+.rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--size-12);
+  max-width: 34rem;
+}
+
+.rules li {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr auto;
+  gap: var(--gap-tight);
+  padding: 2px 0;
+  border-bottom: 1px dotted var(--rule);
+}
+
+.rules li.empty {
+  color: var(--dye-2);
+}
+
+.rules .glyph {
+  color: var(--dye-3);
+}
+
+.rules li.empty .glyph {
+  color: var(--dye-2);
+}
+
+.candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.candidates > li {
+  padding: var(--gap-tight) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.candidate-url {
+  margin: 0 0 var(--gap-hair);
+  font-size: var(--size-12);
+  word-break: break-all;
+}
+
+.candidates > li.won .candidate-url {
+  color: var(--dye-4);
+  font-weight: 500;
+}
+
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-hair) var(--gap);
+  font-size: var(--size-11);
+}
+
+.steps li {
+  display: flex;
+  gap: 4px;
+  align-items: baseline;
+  color: var(--dye-2);
+}
+
+.steps li.step-ok {
+  color: var(--dye-3);
+}
+
+.steps li.step-fail {
+  color: var(--madder);
+  font-weight: 500;
+}
+
+.steps .num {
+  color: var(--dye-2);
+}
+
+.steps .detail {
+  color: var(--dye-2);
+}
+
+.title-value {
+  margin: 0;
+  font-size: var(--size-15);
+}
+
+/* The link from a photoless row into all of the above. */
+.why-no-photo {
+  font-size: var(--size-11);
+  color: var(--dye-3);
+  white-space: nowrap;
+}
+
+.why-no-photo:hover {
+  color: var(--ink);
+}
+
+/* --------------------------------------------------------------------------
+   The sheet — one file that fills up
+   -------------------------------------------------------------------------- */
+
+.sheet-facts {
+  grid-template-columns: 9rem 1fr;
+  margin-bottom: var(--gap-wide);
+}
+
+.sheet-facts dd.folder {
+  font-size: var(--size-11);
+  color: var(--dye-2);
+  word-break: break-all;
+}
+
+.sheet-preview-title {
+  font-size: var(--size-15);
+  font-weight: 500;
+  margin: var(--gap-wide) 0 var(--gap-tight);
+  padding-top: var(--gap);
+  border-top: 1px solid var(--rule);
+}
+
+/* Wide content scrolls inside its own box; the page never scrolls sideways. */
+.table-scroll {
+  overflow-x: auto;
+  max-height: 32rem;
+  overflow-y: auto;
+}
+
+.sheet-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--size-12);
+}
+
+.sheet-table th {
+  position: sticky;
+  top: 0;
+  background: var(--ground);
+  text-align: left;
+  font-weight: 500;
+  color: var(--dye-2);
+  padding: var(--gap-hair) var(--gap-tight);
+  border-bottom: 1px solid var(--rule-strong);
+  white-space: nowrap;
+}
+
+.sheet-table td {
+  padding: var(--gap-hair) var(--gap-tight);
+  border-bottom: 1px dotted var(--rule);
+  max-width: 32rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The Complete screen's secondary line. One sentence: an operator who does not
+   know the sheet exists will keep merging files by hand. */
+.sheet-line {
+  margin: var(--gap-tight) 0 0;
+  font-size: var(--size-13);
+  color: var(--dye-3);
+}
+
+.sheet-line.is-failed {
+  color: var(--madder);
+}
+
+a.button-link {
+  display: inline-block;
+  text-decoration: none;
+}
+
+/* The companion export, directly under the primary action. One line, because
+   it is a second file and not a second decision. */
+.companion-line {
+  margin: var(--gap-tight) 0 0;
+  font-size: var(--size-12);
+}
+
+/* --------------------------------------------------------------------------
+   Find photos
+
+   A table, because that is what the answer is: one row per product, the photo
+   URL in monospace so it can be read and copied, and the reason where the URL
+   would be when there isn't one.
+   -------------------------------------------------------------------------- */
+
+.file-label input[type="file"] {
+  display: none;
+}
+
+.upload-summary {
+  margin-top: var(--gap-tight);
+  padding: var(--gap-tight) var(--gap);
+  border-left: 3px solid var(--rule-strong);
+  background: var(--resist);
+  font-size: var(--size-12);
+}
+
+.upload-summary p {
+  margin: 0 0 var(--gap-hair);
+}
+
+.upload-summary select {
+  font-family: var(--font-mono);
+  font-size: var(--size-12);
+  padding: 2px var(--gap-hair);
+  border: 1px solid var(--rule-strong);
+  background: var(--ground);
+  color: var(--ink);
+}
+
+.find-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--gap);
+  margin-bottom: var(--gap-tight);
+  padding-top: var(--gap);
+  border-top: 1px solid var(--rule);
+}
+
+.find-progress {
+  margin: 0;
+  font-size: var(--size-13);
+}
+
+.find-actions {
+  display: flex;
+  gap: var(--gap-tight);
+  align-items: center;
+}
+
+/* Filter chips. Buttons with aria-pressed rather than a select: the counts are
+   the point, and a dropdown hides them. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-hair);
+  margin-bottom: var(--gap-tight);
+}
+
+.chip {
+  font-size: var(--size-12);
+  padding: 2px var(--gap-tight);
+  border: 1px solid var(--rule-strong);
+  background: var(--ground);
+  color: var(--dye-3);
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.chip:hover {
+  color: var(--ink);
+}
+
+.chip.chosen {
+  border-color: var(--ink);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+
+.find-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--size-12);
+}
+
+.find-table th {
+  position: sticky;
+  top: 0;
+  background: var(--ground);
+  text-align: left;
+  font-weight: 500;
+  color: var(--dye-2);
+  padding: var(--gap-hair) var(--gap-tight);
+  border-bottom: 1px solid var(--rule-strong);
+  white-space: nowrap;
+}
+
+.find-table td {
+  padding: var(--gap-hair) var(--gap-tight);
+  border-bottom: 1px dotted var(--rule);
+  vertical-align: top;
+}
+
+.find-table tr.is-failed-row td {
+  background: var(--resist);
+}
+
+.find-title {
+  max-width: 20rem;
+}
+
+.find-title .extra {
+  display: block;
+  font-size: var(--size-11);
+  color: var(--dye-2);
+}
+
+.find-url {
+  overflow-wrap: anywhere;
+}
+
+/* Fixed so a long URL cannot widen its column into the ones beside it -- but
+   fixed ALONE splits the width evenly, which squeezed a CDN URL into a
+   five-line wrap and made every row a paragraph. The narrow columns are sized
+   explicitly and the URL column takes whatever is left, because it is the one
+   the screen exists to show. */
+.find-table {
+  table-layout: fixed;
+}
+
+.find-table th:nth-child(1),
+.find-table td:nth-child(1) { width: 2.5rem; }
+
+.find-table th:nth-child(2),
+.find-table td:nth-child(2) { width: 15rem; }
+
+.find-table th:nth-child(3),
+.find-table td:nth-child(3) { width: 4rem; }
+
+/* 4 is Image URLs: left to take the remainder. */
+
+.find-table th:nth-child(5),
+.find-table td:nth-child(5) { width: 6rem; }
+
+.find-table th:nth-child(6),
+.find-table td:nth-child(6) { width: 10rem; }
+
+.find-table th:nth-child(7),
+.find-table td:nth-child(7) { width: 5rem; }
+
+.find-table th:nth-child(8),
+.find-table td:nth-child(8) { width: 4rem; }
+
+/* A column, not a row. It held one URL and one button side by side; it now
+   holds a numbered list of every photo, and flex laid the list and the
+   "copy all" button beside each other -- straight through the Size, Method
+   and Price columns. */
+.copyable {
+  display: block;
+}
+
+.copyable > .url-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copyable button {
+  font-size: var(--size-11);
+  white-space: nowrap;
+}
+
+/* The open items on the Sheet screen. Closed by default: they are standing
+   questions for haat, not errors, and an operator who has read them once
+   should not have to scroll past them every visit. */
+.open-items-list {
+  list-style: none;
+  margin: 0 0 var(--gap-tight);
+  padding: 0;
+  font-size: var(--size-12);
+}
+
+.open-items-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--gap-hair) 0;
+  border-bottom: 1px dotted var(--rule);
+  max-width: 52rem;
+}
+
+.open-items > summary {
+  color: var(--brass);
+}
+
+/* --- Import: the column mapper (v5 §4.1) ---------------------------------
+   A table because it is one: two columns, one row per column of their file,
+   read down. The unmapped rows are dimmed rather than hidden -- §4.1 says
+   nothing is discarded silently, and a row you cannot see is discarded. */
+
+.mapper {
+  width: 100%;
+  max-width: 44rem;
+  border-collapse: collapse;
+  font-size: var(--size-13);
+  margin: var(--gap) 0;
+}
+
+.mapper th {
+  text-align: left;
+  font-weight: 500;
+  font-size: var(--size-11);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dye-2);
+  padding: 0 0 var(--gap-tight);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.mapper td {
+  padding: var(--gap-tight) var(--gap-tight) var(--gap-tight) 0;
+  border-bottom: 1px dotted var(--rule);
+  vertical-align: baseline;
+}
+
+.mapper tr.empty td:first-child {
+  color: var(--dye-2);
+}
+
+.mapper select {
+  width: 100%;
+  max-width: 16rem;
+  font-family: inherit;
+  font-size: var(--size-13);
+  padding: 2px var(--gap-tight);
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  background: var(--resist);
+}
+
+.mapper tr.empty select {
+  color: var(--dye-2);
+}
+
+.stacked {
+  display: block;
+  font-size: var(--size-13);
+  margin: var(--gap) 0 0;
+}
+
+.stacked input {
+  display: block;
+  margin-top: var(--gap-tight);
+  max-width: 22rem;
+}
+
+/* Every image URL for a row, revealed under the primary one (Find photos). */
+.every-url {
+  list-style: decimal;
+  margin: var(--gap-tight) 0 var(--gap-tight) 1.4rem;
+  padding: 0;
+  font-size: var(--size-11);
+  color: var(--dye-2);
+}
+
+.every-url li {
+  padding: 1px 0;
+  word-break: break-all;
+}
+
+/* Every image URL, listed rather than counted (Find photos). Numbered so an
+   operator can say "the third one" and be understood. */
+.every-url {
+  list-style: decimal;
+  margin: 0 0 0 1.5rem;
+  padding: 0;
+  font-size: var(--size-11);
+}
+
+.every-url li {
+  padding: 2px 0;
+  /* A CDN URL is longer than any sane column. Break it anywhere rather than
+     let one line decide the table's width. */
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.every-url a.url-text {
+  color: var(--dye-3);
+  text-decoration: none;
+  border-bottom: 1px solid var(--rule);
+}
+
+.every-url a.url-text:hover {
+  border-bottom-color: var(--dye-3);
+}
+
+.every-url .linkish {
+  margin-left: var(--gap-tight);
 }

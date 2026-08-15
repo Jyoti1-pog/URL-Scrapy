@@ -11,8 +11,9 @@ bad one means six.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
+from urllib.parse import urlsplit
 
 from selectolax.parser import HTMLParser
 
@@ -51,10 +52,59 @@ class ImageCandidate:
     declared_h: int | None = None
     srcset_width: int | None = None
     upsized_from: str | None = None
+    # Which collection rule produced this. Carried for `diagnose` only -- nothing
+    # in the ranking reads it -- so that "found 0 candidates" can be broken down
+    # into which of the six rules came up empty instead of leaving an operator to
+    # read this file.
+    rule: str = ""
 
     @property
     def declared_max(self) -> int:
         return max(self.declared_w or 0, self.declared_h or 0)
+
+
+# The rules `_collect_raw` applies, in the order it applies them. Named here so
+# a report can list the ones that found nothing -- a rule that yields zero is
+# invisible in the output otherwise, and "which rule should have caught this?"
+# is the whole question when a page with obvious photos yields none.
+RULES: tuple[str, ...] = (
+    "structured Product.image",
+    "og:image",
+    "twitter:image",
+    "srcset",
+    "img src",
+    "lazy attributes",
+    "background-image",
+)
+
+
+@dataclass
+class CollectionTrace:
+    """What collection saw, for `diagnose`. Never consulted by the pipeline.
+
+    `collect_candidates` fills one when handed one and behaves identically when
+    not, so the report describes the real run rather than a re-implementation of
+    it that could drift.
+    """
+
+    raw: list[ImageCandidate] = field(default_factory=list)
+    # (url, why) for references that never reached the ranking. The interesting
+    # half of the report: a page whose photos are all rejected as icons looks
+    # exactly like a page with no photos until you can see this.
+    dropped: list[tuple[str, str]] = field(default_factory=list)
+    kept: list[ImageCandidate] = field(default_factory=list)
+
+    def by_rule(self) -> dict[str, int]:
+        counts = dict.fromkeys(RULES, 0)
+        for candidate in self.raw:
+            counts[candidate.rule] = counts.get(candidate.rule, 0) + 1
+        return counts
+
+    def drops_by_reason(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for _, reason in self.dropped:
+            counts[reason] = counts.get(reason, 0) + 1
+        return counts
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +177,19 @@ def _collect_raw(sd: StructuredData, dom: HTMLParser, cfg: ImagesConfig) -> list
     found: list[ImageCandidate] = []
     index = 0
 
-    def add(raw: str | None, source: FieldSource, srcset_width: int | None = None) -> None:
+    def add(
+        raw: str | None, source: FieldSource, rule: str, srcset_width: int | None = None
+    ) -> None:
         nonlocal index
         if raw:
             found.append(
-                ImageCandidate(url=raw, source=source, dom_index=index, srcset_width=srcset_width)
+                ImageCandidate(
+                    url=raw,
+                    source=source,
+                    dom_index=index,
+                    srcset_width=srcset_width,
+                    rule=rule,
+                )
             )
         index += 1
 
@@ -142,15 +200,19 @@ def _collect_raw(sd: StructuredData, dom: HTMLParser, cfg: ImagesConfig) -> list
         items = raw_images if isinstance(raw_images, list) else [raw_images]
         for item in items:
             if isinstance(item, dict):
-                add(scalar(item.get("contentUrl") or item.get("url") or item), sd.product_source)
+                add(
+                    scalar(item.get("contentUrl") or item.get("url") or item),
+                    sd.product_source,
+                    RULES[0],
+                )
             else:
-                add(scalar(item), sd.product_source)
+                add(scalar(item), sd.product_source, RULES[0])
 
     # 2. OpenGraph, then Twitter.
     for key in ("og:image:secure_url", "og:image", "og:image:url"):
-        add(sd.opengraph.get(key), FieldSource.OG)
+        add(sd.opengraph.get(key), FieldSource.OG, RULES[1])
     for key in ("twitter:image", "twitter:image:src"):
-        add(sd.twitter.get(key), FieldSource.TWITTER)
+        add(sd.twitter.get(key), FieldSource.TWITTER, RULES[2])
 
     # 3. DOM images: srcset entries, src, then lazy attributes.
     for node in dom.css("img"):
@@ -158,18 +220,18 @@ def _collect_raw(sd: StructuredData, dom: HTMLParser, cfg: ImagesConfig) -> list
         for attr in ("srcset", "data-srcset"):
             if value := attrs.get(attr):
                 for url, width in _parse_srcset(value):
-                    add(url, FieldSource.HEURISTIC, width)
-        add(attrs.get("src"), FieldSource.HEURISTIC)
+                    add(url, FieldSource.HEURISTIC, RULES[3], width)
+        add(attrs.get("src"), FieldSource.HEURISTIC, RULES[4])
         for attr in cfg.lazy_attributes:
             if attr != "data-srcset":
-                add(attrs.get(attr), FieldSource.HEURISTIC)
+                add(attrs.get(attr), FieldSource.HEURISTIC, RULES[5])
 
     # 4. Elements carrying a background image, which is how a lot of themes do
     #    gallery zoom.
     for node in dom.css("[style*='background-image']"):
         if style := node.attributes.get("style"):
             for match in _BACKGROUND_URL.finditer(style):
-                add(match.group(1), FieldSource.HEURISTIC)
+                add(match.group(1), FieldSource.HEURISTIC, RULES[6])
 
     return found
 
@@ -202,9 +264,48 @@ def _tier(c: ImageCandidate, vcfg: ValidatorConfig) -> Tier:
     return Tier.UNKNOWN
 
 
-def _sort_key(c: ImageCandidate, vcfg: ValidatorConfig) -> tuple[int, int, int, int]:
+_TOKEN = re.compile(r"[a-z0-9]{3,}")
+
+
+def slug_tokens(page_url: str) -> frozenset[str]:
+    """The meaningful words in a product page's own path.
+
+    `/products/rani-pink-dola-silk-printed-saree` gives
+    {rani, pink, dola, silk, printed, saree}. Numbers and two-letter noise are
+    dropped; so is the shop's own routing vocabulary, which every product on
+    the site shares and which therefore separates nothing.
+    """
+    path = urlsplit(page_url).path.lower()
+    routing = {"products", "product", "item", "items", "shop", "buy", "dp", "collections"}
+    return frozenset(t for t in _TOKEN.findall(path) if t not in routing)
+
+
+def _slug_affinity(url: str, tokens: frozenset[str]) -> int:
+    """How many of the product's own words appear in this image's filename.
+
+    THE SIGNAL THIS CAPTURES. Shops name gallery files after the product:
+    `rani-pink-dola-silk-printed-saree-sg401142-1.jpg`. Site chrome does not --
+    `saree-menu.jpg`, `Women_inch_india.jpg`, `womens-size-in-cms_mob.jpg`.
+    On the page that prompted this, chrome and size charts outranked the
+    gallery and took eight of the ten candidate slots, so a product with a
+    ten-photo gallery reported two.
+
+    Returned as a COUNT and sorted descending, so a page whose images share no
+    words with their own URL scores zero everywhere and the previous order
+    stands untouched. It can promote; it can never demote.
+    """
+    if not tokens:
+        return 0
+    name = urlsplit(url).path.lower().rsplit("/", 1)[-1]
+    return sum(1 for token in tokens if token in name)
+
+
+def _sort_key(
+    c: ImageCandidate, vcfg: ValidatorConfig, slug: frozenset[str] = frozenset()
+) -> tuple[int, int, int, int, int]:
     return (
         _tier(c, vcfg),
+        -_slug_affinity(c.url, slug),
         -max(c.declared_max, c.srcset_width or 0),
         _SOURCE_RANK.get(c.source, 9),
         c.dom_index,
@@ -212,18 +313,30 @@ def _sort_key(c: ImageCandidate, vcfg: ValidatorConfig) -> tuple[int, int, int, 
 
 
 def _normalise(
-    raw: list[ImageCandidate], base_url: str, cfg: ImagesConfig
+    raw: list[ImageCandidate],
+    base_url: str,
+    cfg: ImagesConfig,
+    trace: CollectionTrace | None = None,
 ) -> list[ImageCandidate]:
     """Resolve, clean and filter, keeping the first sighting of each URL."""
     out: list[ImageCandidate] = []
     seen: set[str] = set()
 
+    def drop(url: str, why: str) -> None:
+        if trace is not None:
+            trace.dropped.append((url, why))
+
     for candidate in raw:
         resolved = absolutise(base_url, candidate.url)
         if not resolved:
+            drop(candidate.url, "not a resolvable URL")
             continue
         resolved = strip_query_params(resolved, cfg.strip_query_params)
-        if _is_rejected(resolved, cfg) or resolved in seen:
+        if _is_rejected(resolved, cfg):
+            drop(resolved, "matched images.reject_url_substrings")
+            continue
+        if resolved in seen:
+            drop(resolved, "already seen")
             continue
 
         seen.add(resolved)
@@ -246,6 +359,32 @@ class _Group:
 
     primary: ImageCandidate
     fallbacks: list[ImageCandidate]
+
+
+_SIZE_SUFFIXES = (
+    re.compile(r"\._[A-Za-z0-9_,]+_(?=\.[a-z]{3,4}$)"),   # Amazon  ._SL1500_
+    re.compile(r"_\d{2,4}x\d{0,4}(?=\.[a-z]{3,4}$)"),      # Shopify _800x800
+    re.compile(r"-\d{2,4}x\d{2,4}(?=\.[a-z]{3,4}$)"),      # WordPress -800x800
+)
+
+
+def photo_identity(url: str) -> str:
+    """Which PHOTOGRAPH this URL is, ignoring what size it happens to be.
+
+    `71rOScyvhRL.jpg` and `71rOScyvhRL._SL1500_.jpg` are one photograph at two
+    resolutions, as are `saree-1.jpg?v=1` and `saree-1_1000x.jpg`. Counting
+    them separately made "10 photos" mean "four photographs, some of them
+    twice" -- which is worse than a smaller honest number, because the operator
+    pastes it into a listing and finds duplicates.
+
+    Deliberately filename-only. Two different photographs on one CDN differ in
+    their filename; the path and query carry cache-busting noise that would
+    make every variant look distinct.
+    """
+    name = urlsplit(url).path.rsplit("/", 1)[-1].lower()
+    for pattern in _SIZE_SUFFIXES:
+        name = pattern.sub("", name)
+    return name
 
 
 def _group_by_photo(
@@ -288,19 +427,41 @@ def collect_candidates(
     base_url: str,
     cfg: ImagesConfig,
     vcfg: ValidatorConfig,
+    trace: CollectionTrace | None = None,
 ) -> list[ImageCandidate]:
     """The ordered candidate list Tier 1 will walk. Hero first.
 
     Each photo contributes its best URL followed immediately by its fallbacks,
     so a full-size guess that 404s drops straight through to the URL the page
     actually published.
+
+    `trace`, when given, is filled with what was seen and what was discarded.
+    It is written to and never read here: passing one cannot change the result.
     """
-    normalised = _normalise(_collect_raw(sd, dom, cfg), base_url, cfg)
+    raw = _collect_raw(sd, dom, cfg)
+    if trace is not None:
+        trace.raw = list(raw)
+
+    normalised = _normalise(raw, base_url, cfg, trace)
     groups = _group_by_photo(normalised, cfg, vcfg)
-    groups.sort(key=lambda g: _sort_key(g.primary, vcfg))
+    slug = slug_tokens(base_url)
+    groups.sort(key=lambda g: _sort_key(g.primary, vcfg, slug))
+
+    # The pool we TEST, which is deliberately wider than the number we keep.
+    # These were the same number, so ten candidates were tried and ten photos
+    # were the most that could ever come back -- and on a page where site
+    # chrome sorted above the gallery, eight of those ten slots went to menu
+    # icons and size charts. Testing is cheap (a HEAD each, and a job stops at
+    # the first pass anyway); being unable to reach the gallery is not.
+    pool = max(cfg.max_candidates, cfg.max_images_per_product)
 
     ordered: list[ImageCandidate] = []
-    for group in groups[: cfg.max_images_per_product]:
+    for group in groups[:pool]:
         ordered.append(group.primary)
-        ordered.extend(sorted(group.fallbacks, key=lambda c: _sort_key(c, vcfg)))
+        ordered.extend(sorted(group.fallbacks, key=lambda c: _sort_key(c, vcfg, slug)))
+
+    if trace is not None:
+        trace.kept = list(ordered)
+        for group in groups[pool:]:
+            trace.dropped.append((group.primary.url, f"beyond max_candidates={pool}"))
     return ordered

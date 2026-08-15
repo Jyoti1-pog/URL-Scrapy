@@ -88,7 +88,7 @@ async def test_http_error_fails_the_row_with_a_named_reason(settings):
     respx.get(PRODUCT_URL).mock(return_value=httpx.Response(404))
     record = await run(settings)
     assert record.status is RowStatus.FAILED
-    assert record.failure_reason == "http_404"
+    assert record.failure_reason == "not_a_product_page"
     assert record.fetch_stage is FetchStage.FAILED
 
 
@@ -99,7 +99,7 @@ async def test_non_html_response_fails_the_row(settings):
     )
     record = await run(settings)
     assert record.status is RowStatus.FAILED
-    assert record.failure_reason == "not_html"
+    assert record.failure_reason == "not_a_product_page"
 
 
 @respx.mock
@@ -107,7 +107,11 @@ async def test_timeout_fails_the_row_rather_than_retrying_forever(settings):
     respx.get(PRODUCT_URL).mock(side_effect=httpx.ConnectTimeout("slow"))
     record = await run(settings)
     assert record.status is RowStatus.FAILED
-    assert record.failure_reason == "timeout"
+    # `timeout`, split by v4 §2.5. Which end timed out matters: a connect
+    # timeout is a host that is not answering, a read timeout is one that
+    # accepted the connection and then went quiet -- which is what a bot wall
+    # black-holing a request looks like.
+    assert record.failure_reason == "timeout_connect"
 
 
 @respx.mock

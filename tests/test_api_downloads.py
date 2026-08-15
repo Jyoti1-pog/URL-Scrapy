@@ -54,7 +54,11 @@ class FakeProcessor:
         await asyncio.sleep(0)
         record = new_record(url, provenance)
         if url in self._fail_for:
-            record.fail("http_503")
+            # What a real 503 produces after v5 §2.1: the enum member, with
+            # the raw status in its own column. A fake that emits a transport
+            # word tests a vocabulary the pipeline no longer speaks.
+            record.fail("http_error_5xx")
+            record.http_status = 503
             return record
         record.title = FieldValue.found(
             f"Product {url.rsplit('/', 1)[-1]}", FieldSource.JSONLD, Confidence.HIGH
@@ -147,7 +151,8 @@ def test_failed_csv_downloads_ready_to_re_run(client: TestClient, job_settings: 
 
     rows = list(csv.DictReader(io.StringIO(body)))
     assert [r["source_url"] for r in rows] == [urls(3)[1]]
-    assert rows[0]["reason"] == "http_503"
+    assert rows[0]["reason"] == "http_error_5xx"
+    assert rows[0]["class"] == "failed"
 
 
 # --------------------------------------------------------------------------

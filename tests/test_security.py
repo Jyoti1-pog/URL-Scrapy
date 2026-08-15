@@ -160,7 +160,17 @@ def test_10_3_job_ids_are_a_fixed_shape() -> None:
 def test_10_3_artifacts_are_an_allowlist_not_a_filename(client: TestClient) -> None:
     from haat_lister.api.routes.downloads import ARTIFACTS
 
-    assert set(ARTIFACTS) == {"listings", "review", "manifest", "failed", "zip"}
+    # Exact, not a superset. An allowlist that grows without anyone noticing is
+    # not an allowlist, so adding an artifact has to be a deliberate edit here
+    # as well as there.
+    assert set(ARTIFACTS) == {
+        "listings",
+        "listings_with_images",
+        "review",
+        "manifest",
+        "failed",
+        "zip",
+    }
     for attempt in ("../../.env", "config.yaml", "job.json", "images", "%2e%2e%2f.env"):
         assert attempt not in ARTIFACTS
 

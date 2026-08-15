@@ -33,17 +33,19 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from . import __version__
-from .config import Settings
+from .config import AppConfig, Settings
 from .models import ImageMode, ProductRecord
+from .output import with_images
 from .output.failed_writer import FailedWriter
 from .output.manifest_writer import ManifestWriter
+from .output.master import MasterStats
 from .output.review_writer import ReviewWriter
 from .store.ledger import Ledger
+from .utils.canonical import DEFAULT_IDENTITY, Identity
 from .utils.logging import get_logger
-from .utils.urls import canonicalise, host_of
+from .utils.urls import canonicalise, extract_urls, host_of
 
 log = get_logger(__name__)
 
@@ -71,6 +73,10 @@ def is_job_id(value: str) -> bool:
 class JobPaths:
     root: Path
     listings: Path
+    # The same rows plus every photo link. A companion, never a replacement:
+    # `listings.csv` has to stay importable, and haat's template has no image
+    # column to put these in.
+    listings_with_images: Path
     review: Path
     manifest: Path
     failed: Path
@@ -108,6 +114,7 @@ def job_paths(settings: Settings, job_id: str) -> JobPaths:
     return JobPaths(
         root=root,
         listings=root / "listings.csv",
+        listings_with_images=root / "listings_with_images.csv",
         review=root / "review.csv",
         manifest=root / "image_manifest.csv",
         failed=root / "failed.csv",
@@ -121,10 +128,66 @@ def job_paths(settings: Settings, job_id: str) -> JobPaths:
 # Planning
 # ---------------------------------------------------------------------------
 
-# What an input line ended up as. `duplicate` and `invalid` are removed before
-# any work happens (section 2.2: collapse before processing, not after); the
-# other two are the two output files the accounting assertion balances.
-LISTED, FAILED, DUPLICATE, INVALID = "listed", "failed", "duplicate", "invalid"
+# WHAT AN INPUT LINE ENDED UP AS.
+#
+# `duplicate` and `invalid` are removed before any work happens (section 2.2:
+# collapse before processing, not after). The other four are terminal states,
+# and every attempted URL lands in exactly one of them:
+#
+#     written      extracted, every required field present   -> listings.csv
+#     needs_human  extracted, something needs a decision     -> listings.csv AND review.csv
+#     refused      the site declined; the tool was correct   -> failed.csv
+#     failed       we reached the site, got no usable row    -> failed.csv
+#
+# `needs_human` is the ONE state that touches two files, and review.csv is a
+# pointer into listings.csv rather than a second copy of the row. `refused` and
+# `failed` never appear in review.csv: there is nothing on those rows for a
+# human to decide, and putting them there is what made three input URLs produce
+# six output rows.
+#
+# `refused` and `failed` are separate because they are not degrees of one thing.
+# Retrying a refusal produces the same refusal forever, so the retry button must
+# be able to tell them apart.
+WRITTEN = "written"
+NEEDS_HUMAN = "needs_human"
+REFUSED = "refused"
+FAILED = "failed"
+DUPLICATE = "duplicate"
+INVALID = "invalid"
+
+# The four that mean "this URL was attempted and is finished".
+TERMINAL: tuple[str, ...] = (WRITTEN, NEEDS_HUMAN, REFUSED, FAILED)
+
+# Rows that reached listings.csv. Both, because a needs_human row IS written --
+# that is the whole point of it being a pointer rather than a copy.
+IN_LISTINGS: tuple[str, ...] = (WRITTEN, NEEDS_HUMAN, "listed")
+
+# Kept so ledgers written before the split still read. `listed` was the single
+# state that `written` and `needs_human` came out of, and it appears in
+# IN_LISTINGS above for exactly that reason -- an old job's rows are still in
+# its listings.csv and a re-export must not drop them.
+LISTED = "listed"
+
+
+def terminal_state(record: ProductRecord, cfg: AppConfig) -> str:
+    """Which of the four this row reached. The single decision point.
+
+    Written here rather than at the call site so the ledger, the counts, the
+    files and the retry button all read one answer. When each of those decided
+    for itself, they disagreed -- a refused row was counted as failed, written
+    into review.csv, and offered for retry, all at once.
+
+    The refused/failed split comes from the reason's own class, so adding a
+    reason cannot forget to say which side it is on: `reasons.py` requires a
+    class on every member and asserts it at import.
+    """
+    from .images.reasons import Klass, klass_of
+    from .models import RowStatus
+    from .output.review_writer import needs_review
+
+    if record.status is RowStatus.FAILED:
+        return REFUSED if klass_of(record.failure_reason) is Klass.REFUSED else FAILED
+    return NEEDS_HUMAN if needs_review(record, cfg) else WRITTEN
 
 
 @dataclass
@@ -134,6 +197,13 @@ class PlannedUrl:
     canonical: str
     status: str  # "ok" | DUPLICATE | INVALID
     note: str = ""
+    # We supplied the scheme for a bare domain like `amazon.in/dp/X`. Carried so
+    # the preview can mark it: an assumed https that turns out to be wrong fails
+    # the row with no visible cause otherwise.
+    assumed_scheme: bool = False
+    # 1-based position in the paste, for messages. Not the same as `index`,
+    # which is this row's position in the output.
+    line: int = 0
 
     @property
     def will_run(self) -> bool:
@@ -217,47 +287,68 @@ def plan_from_ledger(ledger: Ledger, job_id: str) -> JobPlan:
     return plan
 
 
-def plan_urls(lines: list[str]) -> JobPlan:
+def plan_urls(lines: list[str], identity: Identity = DEFAULT_IDENTITY) -> JobPlan:
     """Parse, canonicalise, dedupe. No network, ever.
+
+    The parsing is `extract_urls`, not a second reader living here. That matters
+    more than it looks: the console previews a paste with one function and the
+    job is planned with another, and if those two ever disagree the operator is
+    shown a count the run does not honour.
 
     Duplicates are collapsed *before* processing rather than deduped out of the
     output afterwards -- otherwise the second copy of a URL costs a full fetch
     to discover it was a copy. The collapsed ones are kept in the plan rather
     than dropped, so the count can be shown; section 2.2 is explicit that
     silently dropping is not acceptable even when the drop is correct.
+
+    `identity` decides which links are the same product. It is threaded from
+    Settings rather than defaulted at each call site, because `new_record`
+    computes the same identity later and the two disagreeing would mean rows
+    that the plan expects and the batch never matches up.
     """
     plan = JobPlan()
     seen: dict[str, int] = {}
 
-    # Index is the position among *accepted lines*, not among file lines --
-    # blanks and comments do not occupy an output row, so counting them would
-    # leave permanent gaps in the watermark that nothing ever fills.
-    for raw_line in lines:
-        raw = raw_line.strip()
-        if not raw or raw.startswith("#"):
-            continue
+    # Comment lines are dropped before extraction, not after: `# https://old`
+    # in a URL file is a note to a human, and reading the link out of it would
+    # be the opposite of what the `#` was for.
+    body = "\n".join(line for line in lines if not line.strip().startswith("#"))
+    extraction = extract_urls(body)
 
-        parts = urlsplit(raw)
-        if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
-            plan.urls.append(
-                PlannedUrl(
-                    index=len(plan.urls),
-                    raw=raw,
-                    canonical="",
-                    status=INVALID,
-                    note="not an http(s) link",
-                )
-            )
-            continue
-
-        canonical = canonicalise(raw)
-        entry = PlannedUrl(index=len(plan.urls), raw=raw, canonical=canonical, status="ok")
+    # Index is the position in the OUTPUT, not in the file -- blanks, comments
+    # and prose do not occupy an output row, so counting them would leave
+    # permanent gaps in the watermark that nothing ever fills.
+    for found in extraction.urls:
+        canonical = canonicalise(found.url, identity=identity)
+        entry = PlannedUrl(
+            index=len(plan.urls),
+            raw=found.url,
+            canonical=canonical,
+            status="ok",
+            assumed_scheme=found.assumed_scheme,
+            line=found.line,
+        )
         if (first := seen.get(canonical)) is not None:
             entry.status = DUPLICATE
-            entry.note = f"same product as line {first + 1}"
+            entry.note = f"same product as link {first + 1}"
         else:
             seen[canonical] = entry.index
         plan.urls.append(entry)
+
+    # Last, so a link's position in the output is its position in the paste. An
+    # unparsed fragment never becomes a row, so where it sits in the index is
+    # only ever a reporting detail -- it carries its real line number for that.
+    for leftover in extraction.unparsed:
+        plan.urls.append(
+            PlannedUrl(
+                index=len(plan.urls),
+                raw=leftover.text,
+                canonical="",
+                status=INVALID,
+                note="not a link",
+                line=leftover.line,
+            )
+        )
 
     return plan
 
@@ -337,12 +428,106 @@ def render_listings(
         for row in ledger.job_inputs(job_id):
             index = int(row["input_index"])
             record = by_key.get(row["row_key"]) if row["row_key"] else None
-            if record is not None and outcomes.get(index) == LISTED:
+            if record is not None and outcomes.get(index) in IN_LISTINGS:
                 listings.add(index, record)
             else:
                 listings.skip(index)
         written = listings.written
+
+    # The companion, from the same ordered source. Rebuilt here as well as at
+    # finalise so a re-export after edits updates both files together -- two
+    # exports where one is stale would be worse than one export.
+    render_with_images(ledger, job_id, paths, settings, mode)
     return written
+
+
+def add_to_master(
+    ledger: Ledger,
+    job_id: str,
+    settings: Settings,
+    mode: ImageMode,
+    on_duplicate: str = "skip",
+) -> MasterStats:
+    """Fold this job's listed rows into `runs/master.csv`, in input order.
+
+    Called on COMPLETION only, and by exactly one caller per run. A cancelled
+    job's rows are real and downloadable from the job itself; folding half of
+    them into the working sheet would leave an operator unable to tell which
+    half they were looking at.
+
+    Human edits are applied first, for the same reason `render_listings` applies
+    them: the sheet an operator uploads should say what they decided, not what
+    the page said before they corrected it.
+    """
+    from .edits import apply_edits
+    from .output.master import append, master_path
+
+    edits = ledger.edits_for(job_id)
+    by_key: dict[str, ProductRecord] = {}
+    for payload in ledger.iter_payloads(job_id):
+        stored = ProductRecord.model_validate_json(payload)
+        by_key[stored.row_key] = (
+            apply_edits(stored, edits[stored.row_key], settings)
+            if stored.row_key in edits
+            else stored
+        )
+
+    records: list[ProductRecord] = []
+    canonicals: list[str] = []
+    for row in ledger.job_inputs(job_id):
+        if row["outcome"] not in IN_LISTINGS or not row["row_key"]:
+            continue
+        if (record := by_key.get(row["row_key"])) is not None:
+            records.append(record)
+            # The planner's canonical, not the record's, so the sheet dedupes on
+            # exactly what the job deduped on.
+            canonicals.append(row["canonical"] or record.canonical_url)
+
+    return append(
+        records,
+        canonicals,
+        master_path(settings.root, settings.config),
+        settings.config,
+        job_id=job_id,
+        on_duplicate=on_duplicate,
+        image_mode=mode,
+    )
+
+
+def render_with_images(
+    ledger: Ledger, job_id: str, paths: JobPaths, settings: Settings, mode: ImageMode
+) -> int:
+    """`listings_with_images.csv`, from the ledger in input order.
+
+    A projection like review.csv and the manifest, not a live file: it is
+    regenerated at the end of a job and again on every download, which is what
+    keeps it from ever disagreeing with `listings.csv`.
+
+    Human edits are applied for the same reason `render_listings` applies them:
+    this is the operator's own record, and it should say what they decided.
+    """
+    from .edits import apply_edits
+
+    edits = ledger.edits_for(job_id)
+    outcomes = {int(r["input_index"]): r["outcome"] for r in ledger.job_inputs(job_id)}
+    by_key: dict[str, ProductRecord] = {}
+    for payload in ledger.iter_payloads(job_id):
+        stored = ProductRecord.model_validate_json(payload)
+        by_key[stored.row_key] = (
+            apply_edits(stored, edits[stored.row_key], settings)
+            if stored.row_key in edits
+            else stored
+        )
+
+    ordered = [
+        record
+        for row in ledger.job_inputs(job_id)
+        if row["row_key"]
+        and outcomes.get(int(row["input_index"])) in IN_LISTINGS
+        and (record := by_key.get(row["row_key"])) is not None
+    ]
+    paths.root.mkdir(parents=True, exist_ok=True)
+    return with_images.write(paths.listings_with_images, ordered, settings.config, mode)
 
 
 def render_projections(
@@ -358,10 +543,18 @@ def render_projections(
     counts = {"review": 0, "manifest": 0, "failed": 0}
     paths.root.mkdir(parents=True, exist_ok=True)
 
+    # The image companion is a projection too, and regenerating it here means a
+    # finished job has both files without the batch having to remember.
+    counts["with_images"] = render_with_images(ledger, job_id, paths, settings, mode)
+
+    # Both halves of failed.csv: the site declined, or we could not extract.
+    # They are written to one file with a `class` column rather than two files,
+    # because the operator's action is the same shape -- filter, then decide --
+    # and two files would mean two places to look for one URL.
     failures_by_url = {
         r["source_url"]: (r["reason"] or "unknown")
         for r in ledger.job_inputs(job_id)
-        if r["outcome"] == FAILED
+        if r["outcome"] in (FAILED, REFUSED)
     }
 
     with (
@@ -425,11 +618,17 @@ def assert_accounted(ledger: Ledger, job_id: str) -> dict[str, int]:
             "cannot say where these went, so its CSV should not be trusted."
         )
 
-    unique = sum(counts.get(k, 0) for k in (LISTED, FAILED))
+    # written + needs_human + refused + failed == every URL that was attempted.
+    # Asserted rather than assumed: three inputs produced six output rows for a
+    # whole release because nothing checked this sum.
+    attempted = sum(counts.get(state, 0) for state in (*TERMINAL, LISTED))
     expected = sum(counts.values()) - counts.get(DUPLICATE, 0) - counts.get(INVALID, 0)
-    if unique != expected:
+    if attempted != expected:
+        breakdown = " + ".join(
+            f"{state}({counts.get(state, 0)})" for state in TERMINAL if counts.get(state)
+        )
         raise UnaccountedUrls(
-            f"accounting does not balance: listed({counts.get(LISTED, 0)}) + "
-            f"failed({counts.get(FAILED, 0)}) = {unique}, expected {expected} unique input(s)."
+            f"accounting does not balance: {breakdown or 'nothing'} = {attempted}, "
+            f"expected {expected} unique input(s)."
         )
     return counts

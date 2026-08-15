@@ -257,7 +257,15 @@ async def test_all_tiers_fail_writes_needs_review_row(settings_in_tmp):
     assert result.url == ""
     assert "http_404" in result.reason
     assert record.status.value == "needs_review"
-    assert any("No usable image" in note for note in record.notes)
+    # The flag says what happened in a sentence, not in predicate soup. The
+    # detail is still on the row -- `image_reason` in review.csv -- but
+    # "direct_failed:http_404 -> nothing_downloaded" is a true, complete and
+    # useless thing to put in front of a seller.
+    assert result.none_reason is not None
+    assert any(
+        "failed a listability check" in note or "none of them could be fetched" in note
+        for note in record.notes
+    ), record.notes
 
 
 @respx.mock

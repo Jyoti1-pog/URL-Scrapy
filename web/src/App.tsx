@@ -10,9 +10,13 @@
 
 import { NavLink, Route, Routes } from "react-router-dom";
 import { Compose } from "./routes/Compose";
+import { Diagnose } from "./routes/Diagnose";
+import { Find } from "./routes/Find";
+import { Import } from "./routes/Import";
 import { History } from "./routes/History";
 import { JobScreen } from "./routes/JobScreen";
 import { Review } from "./routes/Review";
+import { Sheet } from "./routes/Sheet";
 import { HealthBanner } from "./components/HealthBanner";
 import "./styles/app.css";
 
@@ -34,7 +38,10 @@ export function App() {
             <NavLink to="/" end>
               Compose
             </NavLink>
+            <NavLink to="/sheet">Sheet</NavLink>
             <NavLink to="/jobs">Jobs</NavLink>
+            <NavLink to="/find">Find photos</NavLink>
+            <NavLink to="/import">Import</NavLink>
           </nav>
         </div>
       </header>
@@ -44,11 +51,19 @@ export function App() {
       <main id="bench" tabIndex={-1}>
         <Routes>
           <Route path="/" element={<Compose />} />
+          <Route path="/sheet" element={<Sheet />} />
           <Route path="/jobs" element={<History />} />
           {/* The job id belongs in the URL: a refresh, a bookmark and a second
               tab all have to work, and all three are just this route again. */}
           <Route path="/jobs/:jobId" element={<JobScreen />} />
           <Route path="/jobs/:jobId/review" element={<Review />} />
+          {/* Reachable without a job: deciding whether a site is worth
+              pointing this at is a question you ask before running one. */}
+          <Route path="/find" element={<Find />} />
+          <Route path="/import" element={<Import />} />
+          {/* The single-URL report, kept as Find photos' detail view --
+              every "Why?" link in the table lands here. */}
+          <Route path="/diagnose" element={<Diagnose />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

@@ -412,6 +412,36 @@ hs_codes:
   by_material_keyword: {}
 
 # ---------------------------------------------------------------------------
+# WHICH LINKS ARE THE SAME PRODUCT
+#
+# The generic pass already drops fragments, default ports and the usual
+# tracking parameters. This section is for marketplaces where that is not
+# enough: one Amazon product link copied out of a browser carries nine
+# parameters that identify the click rather than the product, so two copies of
+# the same link would otherwise be fetched and listed twice.
+#
+# Built in already: amazon (-> /dp/{ASIN}), flipkart (keep pid), etsy
+# (-> /listing/{id}). Add your own here; a rule whose `name` matches a built-in
+# replaces it outright.
+#
+#   rules:
+#     - name: myntra
+#       host_pattern: '(?:.+\.)?myntra\.com'
+#       path_pattern: '/(\d+)/buy'     # ALSO the guard: a rule with a path
+#       path_template: '/{0}/buy'      #   pattern only applies where it matches,
+#       drop_query: ["*"]              #   so a search page keeps its query
+#
+# `path_pattern` doubles as the guard on purpose. Without it, `drop_query: ["*"]`
+# on Amazon would delete the search terms from /s?k=wireless+earbuds.
+# ---------------------------------------------------------------------------
+canonical:
+  rules: []
+  # A size at a different price is usually its own haat listing, so ?variant=
+  # links stay separate unless you say otherwise. Also available as
+  # --merge-variants.
+  merge_variants: false
+
+# ---------------------------------------------------------------------------
 # POLICY SCREEN (Rule 2.4) -- deliberately noisy. A false positive costs a human
 # ten seconds; a false negative costs a delisting.
 # ---------------------------------------------------------------------------

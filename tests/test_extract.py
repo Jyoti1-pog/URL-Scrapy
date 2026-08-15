@@ -351,10 +351,69 @@ def test_lazy_attributes_are_collected(app_config):
 
 
 def test_duplicates_are_removed_and_list_is_capped(app_config):
+    """The pool is capped by `max_candidates`, not by how many photos we keep.
+
+    Those were one number, and it cost a whole gallery: ten candidates tried
+    meant ten photographs was the ceiling, so on a page where menu icons and
+    size charts sorted above the product, eight of the ten slots went to chrome
+    and a ten-photo saree reported two. Testing is a HEAD each and a job stops
+    at the first pass regardless; not reaching the gallery is unrecoverable.
+    """
     html = page("".join(f'<img src="https://cdn.example/{i}.jpg">' for i in range(20)) * 2)
     ranked = candidates(html, app_config)
-    assert len(ranked) == app_config.images.max_images_per_product
-    assert len({c.url for c in ranked}) == len(ranked)
+
+    assert len(ranked) == 20, "twenty distinct images should all be testable"
+    assert len(ranked) <= app_config.images.max_candidates
+    assert len({c.url for c in ranked}) == len(ranked), "the same URL twice"
+    assert app_config.images.max_candidates > app_config.images.max_images_per_product
+
+
+def test_the_pool_is_still_bounded(app_config):
+    """Wider is not unbounded. A page with a thousand images is a page we walk
+    away from partway, not one that costs a thousand requests."""
+    html = page("".join(f'<img src="https://cdn.example/{i}.jpg">' for i in range(500)))
+    ranked = candidates(html, app_config)
+
+    assert len(ranked) == app_config.images.max_candidates
+
+
+def test_an_image_named_after_the_product_outranks_site_chrome(app_config):
+    """The signal that recovered the gallery, and it is not site-specific.
+
+    Shops name gallery files after the product; chrome does not. Sorting on
+    that lifts `rani-pink-dola-silk-printed-saree-1.jpg` above `saree-menu.jpg`
+    and `womens-size-in-cms.jpg` without knowing anything about the shop.
+    """
+    from haat_lister.extract.images import collect_candidates
+    from haat_lister.extract.structured import StructuredData
+
+    url = "https://shop.example/products/rani-pink-dola-silk-printed-saree"
+    html = page(
+        '<img src="https://cdn.example/saree-menu.jpg">'
+        '<img src="https://cdn.example/womens-size-in-cms.jpg">'
+        '<img src="https://cdn.example/rani-pink-dola-silk-printed-saree-1.jpg">'
+    )
+    from selectolax.parser import HTMLParser
+
+    ranked = collect_candidates(
+        StructuredData(), HTMLParser(html), url, app_config.images, app_config.validator
+    )
+
+    assert "rani-pink-dola-silk-printed-saree-1.jpg" in ranked[0].url
+
+
+def test_a_page_sharing_no_words_with_its_images_is_left_alone(app_config):
+    """It can promote; it must never demote.
+
+    libas names its gallery `99937_2.jpg` under a long descriptive slug, so
+    every candidate scores zero -- and the previous ordering has to survive
+    that untouched.
+    """
+    from haat_lister.extract.images import _slug_affinity, slug_tokens
+
+    tokens = slug_tokens("https://shop.example/products/teal-printed-cotton-suit-99937h")
+    assert _slug_affinity("https://cdn.example/99937_2.jpg", tokens) == 0
+    assert _slug_affinity("https://cdn.example/99937_3.jpg", tokens) == 0
 
 
 def test_tier_ordering_is_stable():

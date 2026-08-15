@@ -9,6 +9,13 @@ description = "Product-page to haat bulk-listing CSV automation"
 requires-python = ">=3.11"
 dependencies = [
     "httpx[http2]>=0.27",
+    # Compression codecs, and they are NOT optional. Without brotli we would
+    # still ask for it (a browser header set that omitted it would be unusual),
+    # get it, and fail to decode -- which presented as "every shop but Amazon
+    # has no photographs" rather than as an error. `zstd` is the same story one
+    # release later; CDNs are already turning it on.
+    "brotli>=1.1",
+    "zstandard>=0.22",
     "selectolax>=0.3.21",
     "beautifulsoup4>=4.12",
     "lxml>=5.2",
@@ -26,12 +33,20 @@ dependencies = [
     # command in v2, and an ImportError on the flagship path is a bad first run.
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
+    # Multipart form parsing, for the v5 §4 import routes. A core dependency
+    # rather than an extra: the console ships with the tool and file upload is
+    # how §4.1 and §4.2 are reached from it, so an install without this has a
+    # screen that 500s.
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
 render = ["playwright>=1.44"]
 llm = ["anthropic>=0.34"]
 hosts = ["cloudinary>=1.40"]
+# Optional, and the last thing built. runs/master.csv is the deliverable;
+# this only copies it somewhere colleagues can see.
+sheets = ["google-api-python-client>=2.100", "google-auth>=2.30"]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

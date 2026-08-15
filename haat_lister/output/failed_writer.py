@@ -20,14 +20,29 @@ from types import TracebackType
 from typing import IO, Any
 
 from ..config import AppConfig
+from ..images.reasons import klass_of
 from ..models import ProductRecord
 from ..utils.atomic import atomic_text_writer
 
 FAILED_COLUMNS: tuple[str, ...] = (
     "source_url",
+    # `refused` or `failed`. First after the URL because it is the column an
+    # operator filters on before pasting this file's URLs into a new job:
+    # re-running a refusal produces the same refusal, so the two halves of this
+    # file want completely different actions.
+    "class",
     "reason",
     "stage",
     "http_status",
+    # Which rungs the ladder tried and what each got, so a re-run can be
+    # reasoned about without re-running: "h2 reset in 0.7s, h1.1 timed out at
+    # 8s" says "this host refuses us" far more clearly than one word does.
+    "rungs_tried",
+    # v5 §5. What the row spent before giving up, split three ways. Next to
+    # `rungs_tried` because the two answer one question together: what was
+    # tried, and what it cost. `21s - fetch 19.8s` says "their shop is slow";
+    # `21s - idle 19.0s` says "we waited because they asked us to".
+    "time_spent",
     "attempted_at",
 )
 
@@ -78,21 +93,41 @@ class FailedWriter:
 
     def write(self, record: ProductRecord) -> None:
         reason = record.failure_reason or "unknown"
-        self._row(record.source_url, reason, record.fetch_stage.value, record.fetched_at)
+        self._row(
+            record.source_url,
+            reason,
+            record.fetch_stage.value,
+            record.fetched_at,
+            record.rungs_tried,
+            record.http_status,
+            record.time_spent,
+        )
 
     def write_url(self, source_url: str, reason: str, stage: str = "not_attempted") -> None:
         """For URLs that never became a record at all -- robots-disallowed, or
         dropped when a job was cancelled before reaching them."""
-        self._row(source_url, reason, stage, None)
+        self._row(source_url, reason, stage, None, "", None, "")
 
-    def _row(self, url: str, reason: str, stage: str, when: datetime | None) -> None:
+    def _row(
+        self,
+        url: str,
+        reason: str,
+        stage: str,
+        when: datetime | None,
+        rungs: str = "",
+        status: int | None = None,
+        spent: str = "",
+    ) -> None:
         assert self._writer is not None, "use FailedWriter as a context manager"
         self._writer.writerow(
             [
                 url,
+                klass_of(reason).value,
                 reason,
                 stage,
-                http_status_of(reason),
+                str(status) if status else http_status_of(reason),
+                rungs,
+                spent,
                 (when or datetime.now(UTC)).isoformat(timespec="seconds"),
             ]
         )

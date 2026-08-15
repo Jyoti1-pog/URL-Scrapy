@@ -549,3 +549,31 @@ async def test_all_candidates_failing_returns_no_winner(vcfg):
     assert winner is None
     assert len(results) == 2
     assert all(not r.ok for r in results)
+
+
+# --------------------------------------------------------------------------
+# Two real CDNs that this floor used to reject entirely
+# --------------------------------------------------------------------------
+
+
+def test_an_impossible_content_length_is_not_believed(vcfg) -> None:
+    """Flipkart answers HEAD with `Content-Length: 20` and `image/webp` for a
+    1500x1500 photograph -- a stub for HEAD, the real file for GET.
+
+    Twenty bytes cannot encode an image in any format. Believing the header
+    rejected every photograph on the site as `too_small`, so below the smallest
+    possible encoding the header stops being evidence and predicate 6 reads
+    actual bytes instead.
+    """
+    assert check_size_floor(20, vcfg.min_bytes) is None
+    assert check_size_floor(0, vcfg.min_bytes) is None
+
+
+def test_a_real_pixel_is_still_rejected_for_free(vcfg) -> None:
+    """The line sits at the true minimum so this keeps costing zero requests.
+
+    43 bytes is a genuine 1x1 GIF, and it must die at predicate 5 rather than
+    earning a ranged GET -- a page with ten pixels would otherwise cost ten.
+    """
+    assert check_size_floor(43, vcfg.min_bytes) == "too_small"
+    assert check_size_floor(26, vcfg.min_bytes) == "too_small"
