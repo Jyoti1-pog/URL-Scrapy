@@ -846,12 +846,40 @@ def collect_findings(s: Settings, mode: ImageMode | None = None) -> list[Finding
     mode = mode or s.config.images.default_mode
     return [
         *_identity_findings(s),
+        *_codec_findings(),
         *_taxonomy_findings(s),
         *_mode_findings(s, mode),
         *_field_policy_findings(s),
         *_plugin_findings(s),
         *_llm_findings(s),
         *_invariant_findings(),
+    ]
+
+
+def _codec_findings() -> list[Finding]:
+    """A missing compression codec, said out loud.
+
+    Without this it presents as a shop with no photographs: the fetch returns
+    200, the body is undecodable binary, and the row blames the page for having
+    no title and no images. It cost an entire catalogue's worth of rows before
+    anyone thought to look at the bytes. One line here, one line to fix.
+    """
+    from .fetch.ladder import missing_codecs
+
+    if not (missing := missing_codecs()):
+        return []
+    return [
+        Finding(
+            level="warn",
+            title=f"Cannot decode {', '.join(missing)} responses",
+            detail=(
+                "Sites that compress with these will come back as unreadable bytes, and the "
+                "row will report no title and no images -- blaming the page for something "
+                "that is ours. We do not advertise what we cannot read, so nothing breaks "
+                "silently; those sites just serve us the slower encoding."
+            ),
+            fix="pip install brotli zstandard",
+        )
     ]
 
 

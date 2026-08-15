@@ -1774,3 +1774,17 @@ a.button-link {
   margin-top: var(--gap-tight);
   max-width: 22rem;
 }
+
+/* Every image URL for a row, revealed under the primary one (Find photos). */
+.every-url {
+  list-style: decimal;
+  margin: var(--gap-tight) 0 var(--gap-tight) 1.4rem;
+  padding: 0;
+  font-size: var(--size-11);
+  color: var(--dye-2);
+}
+
+.every-url li {
+  padding: 1px 0;
+  word-break: break-all;
+}

@@ -33,7 +33,22 @@ export const EMPTY_PARSE: Parse = {
   summary: "",
 };
 
-export function useParsedLinks(text: string): { parse: Parse; pending: boolean; error: string | null } {
+/*
+  A count nobody could take is not zero.
+
+  When the agent is unreachable this hook keeps returning EMPTY_PARSE, and both
+  screens rendered its zeros as findings: `links 0 · not a link 0` under a
+  textarea with a perfectly good URL in it, and a disabled button saying "paste
+  some links to begin". That reads as "your link is bad" when the truth is "I
+  could not ask". `checked` is how a caller tells the two apart -- the same
+  three-state discipline §3.1 put into `diagnose`.
+*/
+export function useParsedLinks(text: string): {
+  parse: Parse;
+  pending: boolean;
+  error: string | null;
+  checked: boolean;
+} {
   const [parse, setParse] = useState<Parse>(EMPTY_PARSE);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,5 +88,6 @@ export function useParsedLinks(text: string): { parse: Parse; pending: boolean; 
     return () => window.clearTimeout(timer);
   }, [text]);
 
-  return { parse, pending, error };
+  // Nothing typed is legitimately "nothing to count"; a failed call is not.
+  return { parse, pending, error, checked: error === null || text.trim() === "" };
 }

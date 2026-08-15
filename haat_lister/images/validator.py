@@ -190,14 +190,36 @@ def check_content_type(content_type: str | None) -> str | None:
     return None
 
 
+# The smallest well-formed image there is: a 26-byte 1x1 GIF. Below that, no
+# byte sequence can encode a picture in any format, so a Content-Length under
+# it is not describing a small image -- it is not describing an image.
+#
+# Tight on purpose. An earlier attempt used 64, which swallowed the genuine
+# 43-byte tracking pixel this floor exists to kill -- caught by the test that
+# asserts exactly that, which is why the number is the real minimum rather than
+# a comfortable round one.
+SMALLEST_POSSIBLE_IMAGE = 26
+
+
 def check_size_floor(content_length: int | None, min_bytes: int) -> str | None:
     """Predicate 5. Kills tracking pixels and placeholders.
 
     A missing Content-Length does NOT fail here. Chunked responses and plenty of
     CDNs omit it, and rejecting those would throw away good images; predicate 6
     enforces the floor on bytes actually read instead.
+
+    An IMPOSSIBLE Content-Length is treated the same way, and that is not a
+    loosening. Flipkart's CDN answers HEAD with `Content-Length: 20` and
+    `image/webp` for a 1500x1500 photograph -- a stub for HEAD, the real file
+    for GET. Twenty bytes cannot encode any image in any format, so believing
+    it rejected every photograph on the site as `too_small`. Below this
+    threshold the header is not evidence about the picture; predicate 6 reads
+    actual bytes and enforces the floor on those, which is where a genuine
+    43-byte tracking pixel dies anyway.
     """
-    if content_length is not None and content_length < min_bytes:
+    if content_length is None or content_length < SMALLEST_POSSIBLE_IMAGE:
+        return None
+    if content_length < min_bytes:
         return "too_small"
     return None
 
@@ -320,9 +342,12 @@ class Tier1Validator:
         except _ProbeFailed as exc:
             return result(False, exc.reason, 6)
 
-        if probe.content_length is None and bytes_read < cfg.min_bytes:
-            # Deferred from predicate 5: no Content-Length, and the whole file
-            # turned out to be smaller than the floor.
+        if (
+            probe.content_length is None or probe.content_length < SMALLEST_POSSIBLE_IMAGE
+        ) and bytes_read < cfg.min_bytes:
+            # Deferred from predicate 5: the header was absent or impossible,
+            # and the bytes we actually read came in under the floor. This is
+            # where a real tracking pixel dies.
             return result(False, "too_small", 5)
 
         width, height = image.size
@@ -511,17 +536,31 @@ def _int_or_none(value: str | None) -> int | None:
 
 
 async def validate_all_candidates(
-    candidates: list[str], validator: Tier1Validator
+    candidates: list[str],
+    validator: Tier1Validator,
+    *,
+    stop_at_first: bool = True,
 ) -> tuple[ValidationResult | None, list[ValidationResult]]:
-    """Walk candidates in rank order and stop at the first that passes.
+    """Walk candidates in rank order. Returns (winner or None, every result).
 
-    Returns (winner or None, every result including the winner). Tier 1 stopping
-    early is the whole point: on a healthy page this is one HEAD request.
+    `stop_at_first` is the default because a JOB needs one hero photo, and
+    stopping early is what makes Tier 1 a single HEAD request on a healthy
+    page -- across a 200-URL catalogue that economy is the whole design.
+
+    Find photos passes False, because its subtitle promises "every photo for
+    every product" and it was delivering one. That costs up to
+    `max_images_per_product` HEAD requests for a page instead of one, which is
+    the trade that screen exists to make: it writes nothing and creates no
+    listing, so the only thing it spends is time.
     """
     results: list[ValidationResult] = []
+    winner: ValidationResult | None = None
     for url in candidates:
         result = await validator.validate(url)
         results.append(result)
         if result.ok:
-            return result, results
-    return None, results
+            if winner is None:
+                winner = result
+            if stop_at_first:
+                return winner, results
+    return winner, results

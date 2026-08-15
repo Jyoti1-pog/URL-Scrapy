@@ -30,7 +30,10 @@ export function Find() {
   const [filter, setFilter] = useState<Filter>("all");
   const stream = useRef<EventSource | null>(null);
 
-  const { parse } = useParsedLinks(file ? "" : text);
+  // `error` and `checked` were previously dropped, so an unreachable agent
+  // showed as `links 0` with no explanation anywhere on the screen -- the one
+  // place a reader would look for one.
+  const { parse, error: parseError, checked } = useParsedLinks(file ? "" : text);
   const ready = file ? (table?.found ?? 0) > 0 : parse.unique > 0;
 
   useEffect(() => () => stream.current?.close(), []);
@@ -147,22 +150,24 @@ export function Find() {
             <dl className="counter" aria-live="polite">
               <div>
                 <dt>links</dt>
-                <dd className="mono depth-high">{file ? (table?.found ?? 0) : parse.unique}</dd>
+                <dd className="mono depth-high">
+                  {file ? (table?.found ?? 0) : checked ? parse.unique : "--"}
+                </dd>
               </div>
               {!file && (
                 <div>
                   <dt>not a link</dt>
-                  <dd className={`mono ${parse.invalid ? "is-failed" : "depth-none"}`}>
-                    {parse.invalid}
+                  <dd className={`mono ${parse.invalid && checked ? "is-failed" : "depth-none"}`}>
+                    {checked ? parse.invalid : "--"}
                   </dd>
                 </div>
               )}
             </dl>
           </div>
 
-          {error && (
+          {(error || parseError) && (
             <p className="error" role="alert">
-              {error}
+              {error ?? parseError}
             </p>
           )}
 
@@ -311,7 +316,7 @@ function ResultTable({ rows }: { rows: FindRow[] }) {
             <th>#</th>
             <th>Product</th>
             <th>Photos</th>
-            <th>Primary image URL</th>
+            <th>Image URLs</th>
             <th>Size</th>
             <th>Method</th>
             <th>Price</th>
@@ -368,24 +373,46 @@ function ResultTable({ rows }: { rows: FindRow[] }) {
   );
 }
 
+const NEWLINE = String.fromCharCode(10);
+
 function CopyableUrl({ url, all }: { url: string; all: string[] }) {
   const [copied, setCopied] = useState<"" | "one" | "all">("");
+  const [open, setOpen] = useState(false);
   const copy = (text: string, which: "one" | "all") => {
     navigator.clipboard?.writeText(text).then(() => {
       setCopied(which);
       window.setTimeout(() => setCopied(""), 1500);
     });
   };
+  const rest = all.filter((u) => u !== url);
   return (
     <span className="copyable">
       <span className="url-text">{url}</span>
       <button className="linkish" type="button" onClick={() => copy(url, "one")}>
         {copied === "one" ? "copied" : "copy"}
       </button>
-      {all.length > 1 && (
-        <button className="linkish" type="button" onClick={() => copy(all.join(" | "), "all")}>
-          {copied === "all" ? "copied" : `all ${all.length}`}
-        </button>
+      {rest.length > 0 && (
+        <>
+          {/* Every photo, visible rather than only copyable. This screen
+              promises "every photo for every product"; until the validator
+              stopped walking away at the first pass there was never more than
+              one to show, so a count-and-copy button was the whole feature. */}
+          <button className="linkish" type="button" onClick={() => setOpen(!open)}>
+            {open ? "hide" : `show all ${all.length}`}
+          </button>
+          <button className="linkish" type="button" onClick={() => copy(all.join(NEWLINE), "all")}>
+            {copied === "all" ? "copied" : "copy all"}
+          </button>
+          {open && (
+            <ol className="every-url">
+              {all.map((each) => (
+                <li key={each}>
+                  <span className="url-text">{each}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </>
       )}
     </span>
   );

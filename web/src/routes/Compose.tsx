@@ -52,7 +52,7 @@ export function Compose() {
   const [showUnparsed, setShowUnparsed] = useState(false);
   const provenanceRef = useRef<HTMLFieldSetElement>(null);
 
-  const { parse, pending, error: parseError } = useParsedLinks(text);
+  const { parse, pending, error: parseError, checked } = useParsedLinks(text);
   const ready = parse.unique > 0 && settings.provenance !== "";
 
   async function onPreflight() {
@@ -134,7 +134,12 @@ export function Compose() {
           )}
         </div>
 
-        <Counter parse={parse} pending={pending} onShowUnparsed={() => setShowUnparsed(true)} />
+        <Counter
+          parse={parse}
+          pending={pending}
+          checked={checked}
+          onShowUnparsed={() => setShowUnparsed(true)}
+        />
       </div>
 
       <fieldset className="provenance" ref={provenanceRef}>
@@ -195,8 +200,16 @@ export function Compose() {
           <button className="primary" onClick={onPreflight} disabled={!ready || busy}>
             {busy ? "Checking" : "Start processing"}
           </button>
-          {parse.unique === 0 && <span className="hint">Paste some links to begin.</span>}
-          {parse.unique > 0 && !settings.provenance && (
+          {!checked && (
+            <span className="hint is-failed">
+              Cannot reach the agent, so these links have not been checked. Start it with{" "}
+              <code>haat-lister serve</code>, then reload.
+            </span>
+          )}
+          {checked && parse.unique === 0 && (
+            <span className="hint">Paste some links to begin.</span>
+          )}
+          {checked && parse.unique > 0 && !settings.provenance && (
             <span className="hint">Choose who made this content.</span>
           )}
         </div>
@@ -223,26 +236,30 @@ function EmptyInvitation({ onUse }: { onUse: () => void }) {
 function Counter({
   parse,
   pending,
+  checked,
   onShowUnparsed,
 }: {
   parse: Parse;
   pending: boolean;
+  checked?: boolean;
   onShowUnparsed: () => void;
 }) {
+  // A dash, not a zero. See `useParsedLinks`.
+  const n = (value: number) => (checked === false ? "--" : value);
   return (
     <dl className={`counter${pending ? " is-pending" : ""}`} aria-live="polite" aria-busy={pending}>
       <div>
         <dt>pasted</dt>
-        <dd className="mono">{parse.pasted}</dd>
+        <dd className="mono">{n(parse.pasted)}</dd>
       </div>
       <div>
         <dt>unique</dt>
-        <dd className="mono depth-high">{parse.unique}</dd>
+        <dd className="mono depth-high">{n(parse.unique)}</dd>
       </div>
       <div>
         <dt>duplicate</dt>
         <dd className={`mono ${parse.duplicates ? "depth-low" : "depth-none"}`}>
-          {parse.duplicates}
+          {n(parse.duplicates)}
         </dd>
       </div>
       <div>
@@ -250,7 +267,9 @@ function Counter({
         <dd className="mono">
           {/* Clickable, because it is the number someone will reach for when it
               is not zero. A count with nowhere to go sends them hunting. */}
-          {parse.invalid > 0 ? (
+          {checked === false ? (
+            <span className="depth-none">--</span>
+          ) : parse.invalid > 0 ? (
             <button className="linkish is-failed" type="button" onClick={onShowUnparsed}>
               {parse.invalid}
             </button>

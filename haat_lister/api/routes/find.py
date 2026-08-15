@@ -277,7 +277,10 @@ def _row_out(row: FindRow) -> FindRowOut:
         title=row.title,
         title_original=row.title_original,
         primary_image_url=row.primary_image_url,
-        image_urls=[p.url for p in row.photos],
+        # The usable ones only, matching `image_count` and the CSV column.
+        # Sending every candidate meant the console's "all N" offered rejected
+        # thumbnails alongside the real photographs.
+        image_urls=[p.url for p in row.photos if p.ok],
         image_count=row.image_count,
         width=row.width,
         height=row.height,

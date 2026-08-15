@@ -38,6 +38,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import lru_cache
 
 import httpx
 
@@ -226,6 +227,28 @@ def classify(exc: Exception) -> tuple[FailureKind, str]:
     return FailureKind.TRANSPORT_RESET, str(exc)
 
 
+@lru_cache(maxsize=1)
+def _decodable_encodings() -> str:
+    """What we can actually decompress, straight from httpx.
+
+    Cached because it cannot change within a process, and it is read on every
+    request across four rungs.
+    """
+    value = httpx.Client().headers.get("accept-encoding", "gzip, deflate")
+    return str(value)
+
+
+def missing_codecs() -> list[str]:
+    """Codecs a browser would offer that this install cannot read.
+
+    Surfaced by `config-check` rather than left to be discovered as a shop with
+    no photographs: it is a one-line pip install, and not knowing costs whole
+    catalogues.
+    """
+    have = _decodable_encodings()
+    return [name for name in ("br", "zstd") if name not in have]
+
+
 def browser_headers(settings: Settings) -> dict[str, str]:
     """§2.3. A browser being honest about being a browser.
 
@@ -240,7 +263,21 @@ def browser_headers(settings: Settings) -> dict[str, str]:
         "User-Agent": settings.user_agent,
         "Accept": cfg.accept_header,
         "Accept-Language": cfg.accept_language,
-        "Accept-Encoding": "gzip, deflate, br",
+        # NEVER advertise a codec we cannot decode. This line used to read
+        # `"gzip, deflate, br"` unconditionally, and `brotli` is not a hard
+        # dependency -- so on an install without it we asked every site for
+        # Brotli and then handed the raw compressed bytes to the parser.
+        #
+        # The failure was silent and it blamed the shop. A 200 came back, the
+        # body was 191 KB of binary, and the row reported `no_title` and
+        # `no_image_candidates` -- as though the page had no title and no
+        # photographs, when in fact it had 37 images and we could not read any
+        # of them. Only sites that happen to serve gzip worked, which is why
+        # this looked like "the tool only supports Amazon".
+        #
+        # httpx builds its own value from the codecs actually importable, so
+        # asking it is the one answer that cannot drift from the truth.
+        "Accept-Encoding": _decodable_encodings(),
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",

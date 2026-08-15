@@ -104,7 +104,15 @@ class FindRow(BaseModel):
         return self.method.endswith("_low_res")
 
     def all_image_urls(self) -> str:
-        return " | ".join(photo.url for photo in self.photos)
+        """Only the photos that PASSED, so this agrees with `image_count`.
+
+        It used to join every candidate, failures included -- so a row reading
+        `image_count 10` shipped 33 URLs, 23 of them rejected thumbnails and
+        sprites. A column of links an operator cannot use is worse than a
+        shorter one, because they find out one paste at a time. The rejects are
+        still in the report, under the reason that rejected them.
+        """
+        return " | ".join(photo.url for photo in self.photos if photo.ok)
 
 
 @dataclass
@@ -325,7 +333,11 @@ async def _resolve_one(
         return row
 
     try:
-        winner, results = await validate_all_candidates(record.image_candidates, validator)
+        # Every photo, not the first one that works. This screen says so in
+        # its own subtitle, and was showing a single URL.
+        winner, results = await validate_all_candidates(
+            record.image_candidates, validator, stop_at_first=False
+        )
     except BlockedHost as exc:
         row.reason = "blocked_address"
         row.explanation = str(exc).splitlines()[0]

@@ -9,6 +9,13 @@ description = "Product-page to haat bulk-listing CSV automation"
 requires-python = ">=3.11"
 dependencies = [
     "httpx[http2]>=0.27",
+    # Compression codecs, and they are NOT optional. Without brotli we would
+    # still ask for it (a browser header set that omitted it would be unusual),
+    # get it, and fail to decode -- which presented as "every shop but Amazon
+    # has no photographs" rather than as an error. `zstd` is the same story one
+    # release later; CDNs are already turning it on.
+    "brotli>=1.1",
+    "zstandard>=0.22",
     "selectolax>=0.3.21",
     "beautifulsoup4>=4.12",
     "lxml>=5.2",
