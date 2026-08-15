@@ -540,6 +540,7 @@ async def validate_all_candidates(
     validator: Tier1Validator,
     *,
     stop_at_first: bool = True,
+    max_ok: int | None = None,
 ) -> tuple[ValidationResult | None, list[ValidationResult]]:
     """Walk candidates in rank order. Returns (winner or None, every result).
 
@@ -548,10 +549,13 @@ async def validate_all_candidates(
     page -- across a 200-URL catalogue that economy is the whole design.
 
     Find photos passes False, because its subtitle promises "every photo for
-    every product" and it was delivering one. That costs up to
-    `max_images_per_product` HEAD requests for a page instead of one, which is
-    the trade that screen exists to make: it writes nothing and creates no
-    listing, so the only thing it spends is time.
+    every product" and it was delivering one. It writes nothing and creates no
+    listing, so the only thing that costs is time.
+
+    `max_ok` stops the walk once that many have passed, so the candidate pool
+    can be wide -- wide enough to reach a gallery sitting behind a page's menu
+    icons -- without a page of forty images costing forty requests when ten
+    photographs is all anybody wanted.
     """
     results: list[ValidationResult] = []
     winner: ValidationResult | None = None
@@ -562,5 +566,7 @@ async def validate_all_candidates(
             if winner is None:
                 winner = result
             if stop_at_first:
+                return winner, results
+            if max_ok is not None and sum(1 for r in results if r.ok) >= max_ok:
                 return winner, results
     return winner, results

@@ -340,7 +340,10 @@ async def _resolve_one(
         # Every photo, not the first one that works. This screen says so in
         # its own subtitle, and was showing a single URL.
         winner, results = await validate_all_candidates(
-            record.image_candidates, validator, stop_at_first=False
+            record.image_candidates,
+            validator,
+            stop_at_first=False,
+            max_ok=settings.config.images.max_images_per_product,
         )
     except BlockedHost as exc:
         row.reason = "blocked_address"
@@ -348,9 +351,27 @@ async def _resolve_one(
         row.elapsed_ms = int((time.perf_counter() - started) * 1000)
         return row
 
+    # One entry per PHOTOGRAPH, not per URL. The candidate list carries a
+    # full-size guess alongside the published URL for the same picture, so
+    # counting URLs reported the same saree three times at three resolutions.
+    # The best-resolution copy of each wins.
+    from .extract.images import photo_identity
+
+    by_photo: dict[str, object] = {}
+    for r in results:
+        if not r.ok:
+            continue
+        key = photo_identity(r.url)
+        held = by_photo.get(key)
+        area = (r.width or 0) * (r.height or 0)
+        if held is None or area > (held.width or 0) * (held.height or 0):  # type: ignore[attr-defined]
+            by_photo[key] = r
+
+    kept = {id(r) for r in by_photo.values()}
     row.photos = [
         FoundPhoto(url=r.url, ok=r.ok, width=r.width, height=r.height, reason=r.reason)
         for r in results
+        if not r.ok or id(r) in kept
     ]
     row.image_count = sum(1 for p in row.photos if p.ok)
 

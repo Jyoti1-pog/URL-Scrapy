@@ -204,7 +204,15 @@ class ValidatorConfig(_Section):
 
 class ImagesConfig(_Section):
     default_mode: ImageMode = ImageMode.MANIFEST
+    # How many photographs to KEEP for a product.
     max_images_per_product: int = 10
+    # How many candidates to TEST. Deliberately larger, because these used to
+    # be one number: ten candidates tried meant ten photos was the ceiling, and
+    # on a page where menu icons and size charts sorted above the gallery,
+    # eight of the ten slots went to chrome and a ten-photo product reported
+    # two. A HEAD each is cheap and a job stops at the first pass regardless;
+    # being unable to reach the gallery at all is not.
+    max_candidates: int = 40
     max_download_mb: int = 15
     accepted_formats: list[str] = Field(default_factory=lambda: ["jpeg", "png", "webp"])
     max_file_mb: int = 8

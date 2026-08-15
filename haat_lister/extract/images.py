@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import IntEnum
+from urllib.parse import urlsplit
 
 from selectolax.parser import HTMLParser
 
@@ -263,9 +264,48 @@ def _tier(c: ImageCandidate, vcfg: ValidatorConfig) -> Tier:
     return Tier.UNKNOWN
 
 
-def _sort_key(c: ImageCandidate, vcfg: ValidatorConfig) -> tuple[int, int, int, int]:
+_TOKEN = re.compile(r"[a-z0-9]{3,}")
+
+
+def slug_tokens(page_url: str) -> frozenset[str]:
+    """The meaningful words in a product page's own path.
+
+    `/products/rani-pink-dola-silk-printed-saree` gives
+    {rani, pink, dola, silk, printed, saree}. Numbers and two-letter noise are
+    dropped; so is the shop's own routing vocabulary, which every product on
+    the site shares and which therefore separates nothing.
+    """
+    path = urlsplit(page_url).path.lower()
+    routing = {"products", "product", "item", "items", "shop", "buy", "dp", "collections"}
+    return frozenset(t for t in _TOKEN.findall(path) if t not in routing)
+
+
+def _slug_affinity(url: str, tokens: frozenset[str]) -> int:
+    """How many of the product's own words appear in this image's filename.
+
+    THE SIGNAL THIS CAPTURES. Shops name gallery files after the product:
+    `rani-pink-dola-silk-printed-saree-sg401142-1.jpg`. Site chrome does not --
+    `saree-menu.jpg`, `Women_inch_india.jpg`, `womens-size-in-cms_mob.jpg`.
+    On the page that prompted this, chrome and size charts outranked the
+    gallery and took eight of the ten candidate slots, so a product with a
+    ten-photo gallery reported two.
+
+    Returned as a COUNT and sorted descending, so a page whose images share no
+    words with their own URL scores zero everywhere and the previous order
+    stands untouched. It can promote; it can never demote.
+    """
+    if not tokens:
+        return 0
+    name = urlsplit(url).path.lower().rsplit("/", 1)[-1]
+    return sum(1 for token in tokens if token in name)
+
+
+def _sort_key(
+    c: ImageCandidate, vcfg: ValidatorConfig, slug: frozenset[str] = frozenset()
+) -> tuple[int, int, int, int, int]:
     return (
         _tier(c, vcfg),
+        -_slug_affinity(c.url, slug),
         -max(c.declared_max, c.srcset_width or 0),
         _SOURCE_RANK.get(c.source, 9),
         c.dom_index,
@@ -319,6 +359,32 @@ class _Group:
 
     primary: ImageCandidate
     fallbacks: list[ImageCandidate]
+
+
+_SIZE_SUFFIXES = (
+    re.compile(r"\._[A-Za-z0-9_,]+_(?=\.[a-z]{3,4}$)"),   # Amazon  ._SL1500_
+    re.compile(r"_\d{2,4}x\d{0,4}(?=\.[a-z]{3,4}$)"),      # Shopify _800x800
+    re.compile(r"-\d{2,4}x\d{2,4}(?=\.[a-z]{3,4}$)"),      # WordPress -800x800
+)
+
+
+def photo_identity(url: str) -> str:
+    """Which PHOTOGRAPH this URL is, ignoring what size it happens to be.
+
+    `71rOScyvhRL.jpg` and `71rOScyvhRL._SL1500_.jpg` are one photograph at two
+    resolutions, as are `saree-1.jpg?v=1` and `saree-1_1000x.jpg`. Counting
+    them separately made "10 photos" mean "four photographs, some of them
+    twice" -- which is worse than a smaller honest number, because the operator
+    pastes it into a listing and finds duplicates.
+
+    Deliberately filename-only. Two different photographs on one CDN differ in
+    their filename; the path and query carry cache-busting noise that would
+    make every variant look distinct.
+    """
+    name = urlsplit(url).path.rsplit("/", 1)[-1].lower()
+    for pattern in _SIZE_SUFFIXES:
+        name = pattern.sub("", name)
+    return name
 
 
 def _group_by_photo(
@@ -378,17 +444,24 @@ def collect_candidates(
 
     normalised = _normalise(raw, base_url, cfg, trace)
     groups = _group_by_photo(normalised, cfg, vcfg)
-    groups.sort(key=lambda g: _sort_key(g.primary, vcfg))
+    slug = slug_tokens(base_url)
+    groups.sort(key=lambda g: _sort_key(g.primary, vcfg, slug))
+
+    # The pool we TEST, which is deliberately wider than the number we keep.
+    # These were the same number, so ten candidates were tried and ten photos
+    # were the most that could ever come back -- and on a page where site
+    # chrome sorted above the gallery, eight of those ten slots went to menu
+    # icons and size charts. Testing is cheap (a HEAD each, and a job stops at
+    # the first pass anyway); being unable to reach the gallery is not.
+    pool = max(cfg.max_candidates, cfg.max_images_per_product)
 
     ordered: list[ImageCandidate] = []
-    for group in groups[: cfg.max_images_per_product]:
+    for group in groups[:pool]:
         ordered.append(group.primary)
-        ordered.extend(sorted(group.fallbacks, key=lambda c: _sort_key(c, vcfg)))
+        ordered.extend(sorted(group.fallbacks, key=lambda c: _sort_key(c, vcfg, slug)))
 
     if trace is not None:
         trace.kept = list(ordered)
-        for group in groups[cfg.max_images_per_product :]:
-            trace.dropped.append(
-                (group.primary.url, f"beyond max_images_per_product={cfg.max_images_per_product}")
-            )
+        for group in groups[pool:]:
+            trace.dropped.append((group.primary.url, f"beyond max_candidates={pool}"))
     return ordered
