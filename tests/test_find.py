@@ -312,13 +312,26 @@ def test_image_links_csv_carries_the_operators_own_columns(
         table = list(csv.reader(handle))
 
     assert table[0][:2] == ["sku", "stock"]
-    assert table[0][2:] == list(BASE_COLUMNS)
+    assert table[0][2 : 2 + len(BASE_COLUMNS)] == list(BASE_COLUMNS)
     row = dict(zip(table[0], table[1], strict=True))
     assert row["sku"] == "KUR-001"
-    assert row["primary_image_url"] == "https://shop.example/img/a.jpg"
-    assert row["all_image_urls"] == (
-        "https://shop.example/img/a.jpg | https://shop.example/img/b.jpg"
-    )
+
+    # One photograph per cell. They used to share a single `all_image_urls`
+    # cell joined by " | ", which is fine for a machine and useless in a
+    # spreadsheet -- ten links in one cell cannot be sorted, filtered, clicked
+    # or pasted into a bulk-upload column without being split by hand.
+    assert row["image_url_1"] == "https://shop.example/img/a.jpg"
+    assert row["image_url_2"] == "https://shop.example/img/b.jpg"
+    assert row["image_url_1"] == rows[0].primary_image_url, "column 1 is the primary"
+
+    # Fixed width, so every row has the same shape. A ragged CSV is not a CSV.
+    photo_columns = [c for c in table[0] if c.startswith("image_url_")]
+    assert len(photo_columns) == settings.config.images.max_images_per_product
+    assert row["image_url_3"] == "", "unused cells are empty, not absent"
+
+    # And nothing joins them back together behind the operator's back.
+    assert "all_image_urls" not in row
+    assert not any(" | " in value for value in row.values())
 
 
 def test_image_links_is_not_a_haat_import_file(settings: Settings, tmp_path: Path) -> None:

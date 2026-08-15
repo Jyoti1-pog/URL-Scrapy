@@ -140,11 +140,10 @@ def _pick_url_column(table: ParsedTable, requested: str | None) -> tuple[str, in
 # image_links.csv
 # ---------------------------------------------------------------------------
 
+# Everything except the image URLs, which are generated per-photo below.
 BASE_COLUMNS: tuple[str, ...] = (
     "source_url",
     "title",
-    "primary_image_url",
-    "all_image_urls",
     "image_count",
     "width",
     "height",
@@ -157,6 +156,21 @@ BASE_COLUMNS: tuple[str, ...] = (
     "dimensions_cm",
     "description",
 )
+
+
+def image_columns(count: int) -> list[str]:
+    """`image_url_1 ... image_url_N`, one photograph per cell.
+
+    They used to share a single `all_image_urls` cell joined by ` | `. That is
+    fine for a machine and useless in a spreadsheet: ten links in one cell
+    cannot be sorted, filtered, clicked, or pasted into a bulk-upload column
+    without splitting them by hand, every time.
+
+    The width is fixed by `images.max_images_per_product` so every row has the
+    same shape -- a ragged CSV is not a CSV. Rows with fewer photos leave the
+    remaining cells empty, which is what a spreadsheet expects.
+    """
+    return [f"image_url_{n}" for n in range(1, count + 1)]
 
 
 def write_image_links(
@@ -175,7 +189,14 @@ def write_image_links(
 
     prefixes = cfg.csv.injection_prefixes
     extras = extra_columns or []
-    header = (*extras, *BASE_COLUMNS)
+    # Never narrower than the widest row: a photo that exists and has no column
+    # to sit in is a photo silently dropped.
+    width = max(
+        cfg.images.max_images_per_product,
+        max((r.image_count for r in rows), default=0),
+    )
+    photo_columns = image_columns(width)
+    header = (*extras, *BASE_COLUMNS, *photo_columns)
 
     with atomic_text_writer(path, encoding="utf-8-sig" if cfg.csv.excel_bom else "utf-8") as fh:
         writer = csv.writer(
@@ -190,8 +211,6 @@ def write_image_links(
                     *(_clean(row.extra.get(name, ""), prefixes) for name in extras),
                     _clean(row.source_url, prefixes),
                     _clean(row.title, prefixes),
-                    _clean(row.primary_image_url, prefixes),
-                    _clean(row.all_image_urls(), prefixes),
                     str(row.image_count),
                     str(row.width or ""),
                     str(row.height or ""),
@@ -203,6 +222,14 @@ def write_image_links(
                     str(row.weight_g or ""),
                     _clean(row.dimensions, prefixes),
                     _clean(row.description, prefixes),
+                    *(
+                        _clean(url, prefixes)
+                        for url in _padded(row.usable_image_urls(), width)
+                    ),
                 ]
             )
     return len(rows)
+
+
+def _padded(urls: list[str], width: int) -> list[str]:
+    return [*urls[:width], *([""] * max(0, width - len(urls)))]

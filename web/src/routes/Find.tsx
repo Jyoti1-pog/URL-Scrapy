@@ -376,43 +376,45 @@ function ResultTable({ rows }: { rows: FindRow[] }) {
 const NEWLINE = String.fromCharCode(10);
 
 function CopyableUrl({ url, all }: { url: string; all: string[] }) {
-  const [copied, setCopied] = useState<"" | "one" | "all">("");
-  const [open, setOpen] = useState(false);
-  const copy = (text: string, which: "one" | "all") => {
+  const [copied, setCopied] = useState("");
+  const copy = (text: string, which: string) => {
     navigator.clipboard?.writeText(text).then(() => {
       setCopied(which);
       window.setTimeout(() => setCopied(""), 1500);
     });
   };
-  const rest = all.filter((u) => u !== url);
+
+  /*
+    Every URL, listed. Not one URL and a button claiming there are nine more.
+
+    This screen's whole promise is "every photo for every product", and hiding
+    nine of ten behind `copy all 10` meant an operator could not see what they
+    were about to paste, could not click one to check it, and could not take
+    just the two they wanted. A count is not a list.
+  */
+  const photos = all.length ? all : [url];
   return (
     <span className="copyable">
-      <span className="url-text">{url}</span>
-      <button className="linkish" type="button" onClick={() => copy(url, "one")}>
-        {copied === "one" ? "copied" : "copy"}
-      </button>
-      {rest.length > 0 && (
-        <>
-          {/* Every photo, visible rather than only copyable. This screen
-              promises "every photo for every product"; until the validator
-              stopped walking away at the first pass there was never more than
-              one to show, so a count-and-copy button was the whole feature. */}
-          <button className="linkish" type="button" onClick={() => setOpen(!open)}>
-            {open ? "hide" : `show all ${all.length}`}
-          </button>
-          <button className="linkish" type="button" onClick={() => copy(all.join(NEWLINE), "all")}>
-            {copied === "all" ? "copied" : "copy all"}
-          </button>
-          {open && (
-            <ol className="every-url">
-              {all.map((each) => (
-                <li key={each}>
-                  <span className="url-text">{each}</span>
-                </li>
-              ))}
-            </ol>
-          )}
-        </>
+      <ol className="every-url">
+        {photos.map((each, i) => (
+          <li key={each}>
+            <a href={each} target="_blank" rel="noreferrer" className="url-text">
+              {each}
+            </a>
+            <button className="linkish" type="button" onClick={() => copy(each, `one-${i}`)}>
+              {copied === `one-${i}` ? "copied" : "copy"}
+            </button>
+          </li>
+        ))}
+      </ol>
+      {photos.length > 1 && (
+        <button
+          className="linkish"
+          type="button"
+          onClick={() => copy(photos.join(NEWLINE), "all")}
+        >
+          {copied === "all" ? "copied" : `copy all ${photos.length}`}
+        </button>
       )}
     </span>
   );

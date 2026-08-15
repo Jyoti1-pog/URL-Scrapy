@@ -103,6 +103,10 @@ class FindRow(BaseModel):
     def low_res(self) -> bool:
         return self.method.endswith("_low_res")
 
+    def usable_image_urls(self) -> list[str]:
+        """Every photo that passed, as a list -- one per CSV column."""
+        return [photo.url for photo in self.photos if photo.ok]
+
     def all_image_urls(self) -> str:
         """Only the photos that PASSED, so this agrees with `image_count`.
 

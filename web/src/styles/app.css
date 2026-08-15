@@ -1669,21 +1669,54 @@ a.button-link {
 }
 
 .find-url {
-  max-width: 26rem;
+  overflow-wrap: anywhere;
 }
 
+/* Fixed so a long URL cannot widen its column into the ones beside it -- but
+   fixed ALONE splits the width evenly, which squeezed a CDN URL into a
+   five-line wrap and made every row a paragraph. The narrow columns are sized
+   explicitly and the URL column takes whatever is left, because it is the one
+   the screen exists to show. */
+.find-table {
+  table-layout: fixed;
+}
+
+.find-table th:nth-child(1),
+.find-table td:nth-child(1) { width: 2.5rem; }
+
+.find-table th:nth-child(2),
+.find-table td:nth-child(2) { width: 15rem; }
+
+.find-table th:nth-child(3),
+.find-table td:nth-child(3) { width: 4rem; }
+
+/* 4 is Image URLs: left to take the remainder. */
+
+.find-table th:nth-child(5),
+.find-table td:nth-child(5) { width: 6rem; }
+
+.find-table th:nth-child(6),
+.find-table td:nth-child(6) { width: 10rem; }
+
+.find-table th:nth-child(7),
+.find-table td:nth-child(7) { width: 5rem; }
+
+.find-table th:nth-child(8),
+.find-table td:nth-child(8) { width: 4rem; }
+
+/* A column, not a row. It held one URL and one button side by side; it now
+   holds a numbered list of every photo, and flex laid the list and the
+   "copy all" button beside each other -- straight through the Size, Method
+   and Price columns. */
 .copyable {
-  display: flex;
-  gap: var(--gap-hair);
-  align-items: baseline;
+  display: block;
 }
 
-.copyable .url-text {
+.copyable > .url-text {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
-  min-width: 0;
 }
 
 .copyable button {
@@ -1787,4 +1820,35 @@ a.button-link {
 .every-url li {
   padding: 1px 0;
   word-break: break-all;
+}
+
+/* Every image URL, listed rather than counted (Find photos). Numbered so an
+   operator can say "the third one" and be understood. */
+.every-url {
+  list-style: decimal;
+  margin: 0 0 0 1.5rem;
+  padding: 0;
+  font-size: var(--size-11);
+}
+
+.every-url li {
+  padding: 2px 0;
+  /* A CDN URL is longer than any sane column. Break it anywhere rather than
+     let one line decide the table's width. */
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.every-url a.url-text {
+  color: var(--dye-3);
+  text-decoration: none;
+  border-bottom: 1px solid var(--rule);
+}
+
+.every-url a.url-text:hover {
+  border-bottom-color: var(--dye-3);
+}
+
+.every-url .linkish {
+  margin-left: var(--gap-tight);
 }
