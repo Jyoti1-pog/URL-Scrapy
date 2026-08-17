@@ -287,6 +287,12 @@ class FxConfig(_Section):
 
 class HsCodesConfig(_Section):
     by_category: dict[str, str] = Field(default_factory=dict)
+    # `category/subcategory` -> code. The middle tier, and for some shelves the
+    # only one that can be right: `handwoven-textiles` spans unstitched fabric,
+    # made-up stoles and home linen, which are three different chapters. The
+    # shelf is too coarse to carry a code; the shelf a product actually sits on
+    # is not.
+    by_subcategory: dict[str, str] = Field(default_factory=dict)
     # category -> keyword -> code. NESTED, and the nesting is the point.
     #
     # Flat keywords hijack every shelf: `brass` meant imitation jewellery
@@ -903,8 +909,19 @@ def _hs_findings(s: Settings) -> list[Finding]:
     made-up stoles and home linen, which are three different chapters -- so a
     single code for the shelf would be wrong for most of it.
     """
-    mapped = set(s.config.hs_codes.by_category)
-    unmapped = sorted(set(s.taxonomy.categories) - mapped)
+    hs = s.config.hs_codes
+    unmapped: list[str] = []
+    for slug, category in s.taxonomy.categories.items():
+        if slug in hs.by_category:
+            continue
+        subs = list(getattr(category, "subcategories", {}) or {})
+        # A shelf covered subcategory by subcategory is covered. Reporting it
+        # as missing would send an operator to add a category-level code that
+        # would be wrong for most of the shelf -- which is why it has none.
+        if subs and all(f"{slug}/{sub}" in hs.by_subcategory for sub in subs):
+            continue
+        unmapped.append(slug)
+    unmapped.sort()
     if not unmapped:
         return []
     return [

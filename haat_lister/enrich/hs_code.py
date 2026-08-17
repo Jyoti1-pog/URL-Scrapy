@@ -64,6 +64,25 @@ def suggest(record: ProductRecord, cfg: HsCodesConfig) -> HsResult:
         )
         return result
 
+    # Subcategory before category: on shelves where one code cannot be right
+    # for the whole shelf, the sub-shelf is where it becomes fixed. `sarees`
+    # and `home-textiles` are both `handwoven-textiles` and are not the same
+    # chapter, so a category-level code would be wrong for most of the shelf.
+    subcategory = str(record.subcategory_slug.value or "")
+    if subcategory and (sub_code := cfg.by_subcategory.get(f"{category}/{subcategory}")):
+        result.hs_code = FieldValue.found(
+            sub_code,
+            FieldSource.INFERRED,
+            Confidence.MEDIUM,
+            f"Suggested from the subcategory '{subcategory}'.",
+        )
+        result.notes.append(
+            f"hs_code {sub_code} is a SUGGESTION from the subcategory "
+            f"'{category}/{subcategory}'. HS classification is a customs declaration -- "
+            "confirm it before importing."
+        )
+        return result
+
     category_code = cfg.by_category.get(category)
     if category_code:
         code = category_code

@@ -446,6 +446,29 @@ hs_codes:
       "kanjivaram": "5007"
       "banarasi": "5007"
 
+  # Checked BEFORE by_category, because on some shelves one code cannot be
+  # right for the whole shelf. Keyed `category/subcategory`.
+  #
+  # OPERATOR: every line here is marked VERIFY. These are the 4-digit headings
+  # the articles usually fall under, and "usually" is doing real work -- a
+  # stitched saree and an unstitched one are different chapters. Your broker
+  # settles this in one conversation; until then every row still reaches
+  # review with the code labelled a suggestion.
+  by_subcategory:
+    # VERIFY. 5007 is woven silk fabric, which is where an unstitched saree
+    # sits. A ready-to-wear stitched saree is 6211 instead.
+    handwoven-textiles/sarees: "5007"
+    # VERIFY. 6214 is shawls, scarves, mufflers and veils -- a made-up article
+    # rather than fabric, which is the distinction that matters here.
+    handwoven-textiles/dupattas-stoles: "6214"
+    # VERIFY. 6304 is other furnishing articles. Bed and table linen are 6302
+    # and 6302/6305 respectively, so split this line if you list those.
+    handwoven-textiles/home-textiles: "6304"
+    # VERIFY. Unstitched fabric sold by length, and the CHAPTER follows the
+    # fibre: 5007 silk, 5208 cotton, 5407 synthetic. Left on silk because that
+    # is what this shelf mostly carries; the keywords above override per row.
+    handwoven-textiles/fabric-by-the-metre: "5007"
+
   by_category:
     # Evidenced by haat's own template sample rows.
     apparel: "6206"           # women's blouses/shirts. Menswear is 6205 --

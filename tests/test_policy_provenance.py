@@ -396,3 +396,40 @@ def test_a_suggested_code_is_still_labelled_a_suggestion(app_config):
     assert result.hs_code.confidence is Confidence.MEDIUM
     assert "SUGGESTION" in " ".join(result.notes)
     assert "confirm it before importing" in " ".join(result.notes)
+
+
+def test_the_subcategory_carries_the_code_where_the_shelf_cannot(app_config):
+    """`handwoven-textiles` is four different chapters, so it has no shelf code.
+
+    Sarees are woven fabric and stoles are a made-up article; one code for the
+    shelf would be wrong for most of it. The sub-shelf is where the heading
+    actually becomes fixed, which is what "fixed for a specific category"
+    means once you look at a real taxonomy.
+    """
+    saree = make_record("Rani pink printed saree")
+    saree.category_slug = FieldValue.found("handwoven-textiles", FieldSource.INFERRED)
+    saree.subcategory_slug = FieldValue.found("sarees", FieldSource.INFERRED)
+
+    stole = make_record("Handwoven wool stole")
+    stole.category_slug = FieldValue.found("handwoven-textiles", FieldSource.INFERRED)
+    stole.subcategory_slug = FieldValue.found("dupattas-stoles", FieldSource.INFERRED)
+
+    assert suggest(saree, app_config.hs_codes).hs_code.value == "5007"
+    assert suggest(stole, app_config.hs_codes).hs_code.value == "6214"
+    assert "handwoven-textiles" not in app_config.hs_codes.by_category
+
+
+def test_a_description_keyword_still_beats_the_subcategory(app_config):
+    """Order of authority: description, then sub-shelf, then shelf.
+
+    The description is the most specific thing we have about one product, and
+    the whole reason for reading it is the rows where the shelf is right and
+    the heading still is not.
+    """
+    record = make_record("Pure silk fabric by the metre")
+    record.category_slug = FieldValue.found("handwoven-textiles", FieldSource.INFERRED)
+    record.subcategory_slug = FieldValue.found("fabric-by-the-metre", FieldSource.INFERRED)
+    result = suggest(record, app_config.hs_codes)
+
+    assert result.hs_code.value == "5007"
+    assert "keyword" in " ".join(result.notes)
