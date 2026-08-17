@@ -335,6 +335,11 @@ class ProductRecord(BaseModel):
     # what was available before any network call was made.
     image_candidates: list[str] = Field(default_factory=list)
     structured_syntaxes: list[str] = Field(default_factory=list)
+    # The shop's own shelf for this product -- its breadcrumb trail, and any
+    # `category` its Product node declares. Kept on the record because the
+    # classifier runs later than extraction and this is evidence rather than a
+    # conclusion: it is what the shop says, not what we decided.
+    source_trail: list[str] = Field(default_factory=list)
 
     # What kind of page this turned out to be. Empty means nothing was wrong
     # that `fetch/shape.py` could see -- NOT "definitely a product page". A

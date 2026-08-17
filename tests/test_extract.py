@@ -453,3 +453,84 @@ def test_row_key_is_readable_and_unique():
 )
 def test_declared_dimensions(url, expected):
     assert declared_dimensions(url) == expected
+
+
+# --------------------------------------------------------------------------
+# Classification: the plural, and the shop's own shelf
+# --------------------------------------------------------------------------
+
+
+def test_a_plural_matches_its_singular_keyword(app_config):
+    """The taxonomy is written singular; shops write plural.
+
+    `(?!\w)` after the keyword meant "Sarees" did not match "saree", so a
+    product whose title or breadcrumb said `Sarees` scored zero against the
+    saree shelf and fell to `more-crafts` -- which has no shelves and no HS
+    code. One missed plural emptied category, subcategory and hs_code at once.
+    """
+    from haat_lister.config import Settings
+    from haat_lister.enrich.category import classify
+    from haat_lister.models import Confidence, FieldSource, FieldValue, ProductRecord, Provenance
+
+    taxonomy = Settings.load().taxonomy
+
+    def classified(title: str, trail=None):
+        r = ProductRecord(row_key="k", source_url="u", canonical_url="u",
+                          provenance=Provenance.OWN)
+        r.title = FieldValue.found(title, FieldSource.JSONLD, Confidence.HIGH)
+        c = classify(r, taxonomy, trail)
+        return c.category_slug.value, c.subcategory_slug.value
+
+    assert classified("Handwoven silk sarees") == ("handwoven-textiles", "sarees")
+    assert classified("Handwoven silk saree") == ("handwoven-textiles", "sarees")
+    assert classified("Silver jhumka earrings") == ("jewellery", "earrings")
+
+
+def test_the_shops_own_shelf_outranks_its_product_title(app_config):
+    """A breadcrumb is a different KIND of evidence from a title.
+
+    A title is marketing copy; a trail is the shop stating which shelf it files
+    this on. "Rani Pink Dola Printed Six Yard" names no craft at all and lands
+    in `more-crafts`; the trail settles it.
+    """
+    from haat_lister.config import Settings
+    from haat_lister.enrich.category import classify
+    from haat_lister.models import Confidence, FieldSource, FieldValue, ProductRecord, Provenance
+
+    taxonomy = Settings.load().taxonomy
+    record = ProductRecord(row_key="k", source_url="u", canonical_url="u",
+                           provenance=Provenance.OWN)
+    record.title = FieldValue.found("Rani Pink Dola Printed Six Yard",
+                                    FieldSource.JSONLD, Confidence.HIGH)
+
+    assert classify(record, taxonomy).category_slug.value == taxonomy.fallback_category
+    rescued = classify(record, taxonomy, ["Sarees", "Silk Sarees"])
+    assert rescued.category_slug.value == "handwoven-textiles"
+    assert rescued.subcategory_slug.value == "sarees"
+
+
+def test_a_product_title_in_the_trail_is_not_treated_as_a_shelf():
+    """The last crumb is the product, and it is the title again.
+
+    Injecting it at a HIGHER weight than the title would let one long product
+    name outvote every other signal on the page -- which is what happened on a
+    real shop whose only breadcrumb link was the product itself.
+    """
+    from selectolax.parser import HTMLParser
+
+    from haat_lister.extract.structured import extract_structured
+
+    html = (
+        '<html><head><script type="application/ld+json">'
+        '{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":['
+        '{"@type":"ListItem","position":1,"name":"Home"},'
+        '{"@type":"ListItem","position":2,"name":"Dupattas & Stoles"},'
+        '{"@type":"ListItem","position":3,'
+        '"name":"Hand-block printed mulberry silk stole in indigo and madder"}]}'
+        "</script></head><body></body></html>"
+    )
+    trail = extract_structured(html, "https://shop.example/p/1", HTMLParser(html)).trail
+
+    assert "Dupattas & Stoles" in trail
+    assert not any(len(crumb) > 40 for crumb in trail), "a product title got in"
+    assert "Home" not in trail

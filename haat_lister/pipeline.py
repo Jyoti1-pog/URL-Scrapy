@@ -499,6 +499,8 @@ def extract_into(
     dom = HTMLParser(html)
     structured = extract_structured(html, final_url, dom)
     record.structured_syntaxes = list(structured.syntaxes_found)
+    if structured.trail:
+        record.source_trail = list(structured.trail)
 
     # Observed here, acted on in `process_url`. Extraction describes the page;
     # deciding a row's fate is the pipeline's job, and keeping those apart is
@@ -795,7 +797,7 @@ def _enrich(record: ProductRecord, settings: Settings) -> None:
     """Category, HS code, FX and the policy screen."""
     cfg = settings.config
 
-    category = classify(record, settings.taxonomy)
+    category = classify(record, settings.taxonomy, record.source_trail)
     stated_category = str(record.category_slug.value) if _stated(record.category_slug) else ""
     keep_stated = bool(stated_category) and settings.taxonomy.has_category(stated_category)
 

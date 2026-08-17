@@ -26,6 +26,14 @@ from ..models import Confidence, FieldSource, FieldValue, ProductRecord, StrFiel
 # materials and occasions, titles name the thing itself.
 TITLE_WEIGHT = 3
 DESCRIPTION_WEIGHT = 1
+# The shop's own breadcrumb, weighted above its product title, because it is a
+# different KIND of evidence: a title is marketing copy and a trail is the shop
+# stating which shelf it files this on. "Sarees > Silk Sarees" settles both the
+# category and the subcategory; "Rani Pink Dola Printed" settles neither
+# reliably, and a product that matched no keyword fell all the way to
+# `more-crafts` -- which has no shelves and no HS code, so one miss emptied
+# three columns at once.
+TRAIL_WEIGHT = 5
 
 # Below this, we do not believe our own answer.
 MIN_SCORE = TITLE_WEIGHT
@@ -41,22 +49,45 @@ class CategoryResult:
     scores: dict[str, int] = field(default_factory=dict)
 
 
-def _score(keywords: list[str], title: str, description: str) -> int:
+def _keyword_pattern(keyword: str) -> re.Pattern[str]:
+    r"""A keyword, matching its plural too.
+
+    The taxonomy is written in the singular -- `saree`, `dupatta`, `necklace` --
+    and shops write shelves and titles in the plural. `(?!\w)` after the
+    keyword meant "Sarees" did not match "saree", so a product whose title or
+    breadcrumb said `Sarees` scored zero against the saree shelf and fell all
+    the way to `more-crafts`, which has no shelves and no HS code. One missed
+    plural emptied three columns.
+
+    Only the regular forms, and only as a SUFFIX on the whole keyword. Anything
+    cleverer -- stemming, a plural dictionary -- would start matching words the
+    operator did not write into their taxonomy, which is the thing this file is
+    careful not to do.
+    """
+    return re.compile(rf"(?<!\w){re.escape(keyword.lower())}(?:e?s)?(?!\w)")
+
+
+def _score(keywords: list[str], title: str, description: str, trail: str = "") -> int:
     total = 0
     for keyword in keywords:
-        pattern = re.compile(rf"(?<!\w){re.escape(keyword.lower())}(?!\w)")
+        pattern = _keyword_pattern(keyword)
         if pattern.search(title):
             total += TITLE_WEIGHT
         if pattern.search(description):
             total += DESCRIPTION_WEIGHT
+        if trail and pattern.search(trail):
+            total += TRAIL_WEIGHT
     return total
 
 
 def _best(
-    candidates: dict[str, list[str]], title: str, description: str
+    candidates: dict[str, list[str]], title: str, description: str, trail: str = ""
 ) -> tuple[str | None, dict[str, int], bool]:
     """Returns (winner, all scores, was_a_tie)."""
-    scores = {slug: _score(keywords, title, description) for slug, keywords in candidates.items()}
+    scores = {
+        slug: _score(keywords, title, description, trail)
+        for slug, keywords in candidates.items()
+    }
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
 
     if not ranked or ranked[0][1] < MIN_SCORE:
@@ -79,13 +110,16 @@ def _custom_category_from_title(title: str) -> str:
     return " ".join(words[:6])
 
 
-def classify(record: ProductRecord, taxonomy: Taxonomy) -> CategoryResult:
+def classify(
+    record: ProductRecord, taxonomy: Taxonomy, trail: list[str] | None = None
+) -> CategoryResult:
     title = (record.title.value or "").lower()
     description = (record.description.value or "").lower()
+    crumbs = " ".join(trail or []).lower()
     result = CategoryResult()
 
     parent_keywords = {slug: cat.keywords for slug, cat in taxonomy.categories.items()}
-    winner, scores, tied = _best(parent_keywords, title, description)
+    winner, scores, tied = _best(parent_keywords, title, description, crumbs)
     result.scores = scores
 
     if winner is None or tied:
@@ -130,7 +164,7 @@ def classify(record: ProductRecord, taxonomy: Taxonomy) -> CategoryResult:
         return result
 
     child_keywords = {slug: sub.keywords for slug, sub in category.subcategories.items()}
-    child, child_scores, child_tied = _best(child_keywords, title, description)
+    child, child_scores, child_tied = _best(child_keywords, title, description, crumbs)
     result.scores.update({f"{winner}/{k}": v for k, v in child_scores.items()})
 
     if child is None or child_tied:

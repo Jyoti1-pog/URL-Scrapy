@@ -15,6 +15,7 @@ versions -- a dependency's output format is not worth the coupling.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -106,6 +107,11 @@ class StructuredData:
     twitter: dict[str, str] = field(default_factory=dict)
     meta: dict[str, str] = field(default_factory=dict)
     syntaxes_found: list[str] = field(default_factory=list)
+    # The shop's own shelf for this product: its breadcrumb trail, plus any
+    # `category` the Product node declares. Evidence rather than inference --
+    # "Home > Sarees > Silk Sarees" is the shop telling us where it files this,
+    # which beats guessing from a product title every time.
+    trail: list[str] = field(default_factory=list)
 
     def product_field(self, *keys: str) -> tuple[Any, FieldSource] | None:
         """First present key from the Product node, with its syntax as source."""
@@ -188,5 +194,80 @@ def extract_structured(html: str, base_url: str, dom: HTMLParser | None = None) 
         if data.product is None and (product := _find_product(items)):
             data.product = product
             data.product_source = source
+        if not data.trail:
+            data.trail = _breadcrumb_trail(items)
+
+    if not data.trail:
+        data.trail = _dom_breadcrumbs(dom)
+    if data.product:
+        declared = data.product.get("category")
+        if isinstance(declared, str) and declared.strip():
+            # Shopify and WooCommerce both put a slash- or angle-separated path
+            # here. Split rather than kept whole: "Sarees > Silk" should score
+            # for both words.
+            data.trail.extend(_split_path(declared))
 
     return data
+
+
+_TRAIL_SEPARATORS = re.compile(r"\s*(?:>|/|»|›|\|)\s*")
+
+# Words every shop's trail begins with. They separate nothing, and left in they
+# would let "Home" score against a `home-textiles` shelf on every page.
+_TRAIL_NOISE = frozenset(
+    {"home", "shop", "all", "products", "product", "catalog", "catalogue", "index", "collections"}
+)
+
+
+def _split_path(value: str) -> list[str]:
+    parts = [p.strip() for p in _TRAIL_SEPARATORS.split(value) if p.strip()]
+    return [p for p in parts if _is_shelf(p)]
+
+
+def _breadcrumb_trail(items: list[dict[str, Any]]) -> list[str]:
+    """The names in a schema.org BreadcrumbList, in order, minus the noise."""
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "breadcrumb" in str(item.get("@type", "")).lower():
+            for element in item.get("itemListElement") or []:
+                if not isinstance(element, dict):
+                    continue
+                name = element.get("name")
+                if not name and isinstance(element.get("item"), dict):
+                    name = element["item"].get("name")
+                if isinstance(name, str) and _is_shelf(name.strip()):
+                    out.append(name.strip())
+    return out
+
+
+# A shelf name is short. A product title is not, and the last crumb of a trail
+# is usually the product itself -- which is the title again, and injecting it
+# at a HIGHER weight than the title would let one long product name outvote
+# every other signal on the page.
+MAX_CRUMB_CHARS = 40
+
+
+def _is_shelf(name: str) -> bool:
+    return bool(name) and len(name) <= MAX_CRUMB_CHARS and name.lower() not in _TRAIL_NOISE
+
+
+def _dom_breadcrumbs(dom: HTMLParser) -> list[str]:
+    """The visible trail, for shops that render one without marking it up.
+
+    Best-effort and deliberately narrow: only elements that say `breadcrumb` in
+    their own class or aria-label. Anything looser matches a site's main
+    navigation, which names every shelf the shop has and would score for all of
+    them at once.
+    """
+    for selector in (
+        "[class*='breadcrumb'] a",
+        "[id*='breadcrumb'] a",
+        "nav[aria-label*='readcrumb'] a",
+    ):
+        names = [n.text(strip=True) for n in dom.css(selector)]
+        names = [n for n in names if _is_shelf(n)]
+        if names:
+            return names[:6]
+    return []
