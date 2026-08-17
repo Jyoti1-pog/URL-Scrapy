@@ -31,8 +31,15 @@ stripped URL is added as an ADDITIONAL, higher-ranked candidate and the modified
 one is kept behind it -- never a blind replacement, so a wrong guess costs one
 extra HEAD rather than the row's only photo.
 
-WHAT THIS PLUGIN DOES NOT DO. It does not touch price, weight, dimensions or
-category, and it does not help with a bot check. If Amazon serves a captcha, the
+IT ALSO READS THE PRICE, and only from the buy box. An Amazon detail page
+carries twenty-odd `a-price-whole` nodes -- recommendations, "frequently bought
+together", sponsored strips -- so the generic extractor found none it could
+trust and left the cell blank. Scoped to `#corePriceDisplay` and its siblings,
+the first one IS this product's price, which is the whole reason a per-host
+plugin is allowed to exist.
+
+WHAT THIS PLUGIN DOES NOT DO. It does not touch weight, dimensions or category,
+and it does not help with a bot check. If Amazon serves a captcha, the
 page-shape check fails the row before this ever runs.
 """
 
@@ -42,6 +49,7 @@ import json
 import re
 from typing import Any
 
+from ...models import Confidence, FieldSource, FieldValue
 from ...utils.logging import get_logger
 from ...utils.urls import absolutise
 from . import PluginContext, PluginResult, register
@@ -148,6 +156,54 @@ class AmazonPlugin:
         lowered = url.lower()
         return "amazon." in lowered and ("/dp/" in lowered or "/gp/product/" in lowered)
 
+    # The buy box, in the order Amazon has used it. Anything outside these is a
+    # different product: a recommendation, a bundle, or a sponsored tile.
+    _PRICE_SCOPES = (
+        "#corePrice_feature_div",
+        "#corePriceDisplay_desktop_feature_div",
+        "#corePriceDisplay_mobile_feature_div",
+        "#apex_desktop",
+        "#buybox",
+    )
+
+    def _buy_box_price(self, ctx: PluginContext) -> int | None:
+        """This product's price, or nothing.
+
+        Nothing rather than a guess: an Amazon page has twenty-odd prices on
+        it and only one of them is the thing being sold. Outside the buy box
+        the number belongs to something else, and a confidently wrong price is
+        the single most expensive cell in this file.
+        """
+        for scope in self._PRICE_SCOPES:
+            node = ctx.dom.css_first(scope)
+            if node is None:
+                continue
+            whole = node.css_first(".a-price-whole")
+            if whole is None:
+                continue
+            digits = re.sub(r"[^0-9]", "", whole.text(strip=True))
+            if digits:
+                return int(digits)
+        return None
+
+    def _availability(self, ctx: PluginContext) -> bool | None:
+        """True in stock, False not, None if the page did not say.
+
+        `#availability` is the buy box's own line and is the only place on the
+        page worth reading it from: "currently unavailable" also appears in
+        recommendation tiles, which is why the generic page-shape check saw it
+        "elsewhere on page" and correctly declined to act on it.
+        """
+        node = ctx.dom.css_first("#availability")
+        if node is None:
+            return None
+        text = " ".join(node.text(strip=True).split()).lower()[:120]
+        if "in stock" in text or "usually dispatched" in text:
+            return True
+        if "unavailable" in text or "out of stock" in text:
+            return False
+        return None
+
     def extract(self, ctx: PluginContext) -> PluginResult:
         result = PluginResult()
 
@@ -164,6 +220,29 @@ class AmazonPlugin:
             # second voice saying it would just be noise.
             log.debug("Amazon plugin matched %s but found no gallery", ctx.url)
             return result
+
+        in_stock = self._availability(ctx)
+        if in_stock is not None:
+            # Written through the operator's own vocabulary, never a word of
+            # this plugin's invention -- haat's importer takes one of its own
+            # enum values and "In stock" is not one of them.
+            value = (
+                ctx.config.fields.availability_in_stock_value
+                if in_stock
+                else ctx.config.fields.availability_made_to_order_value
+            )
+            if value:
+                result.fields["availability"] = FieldValue.found(
+                    value, FieldSource.PLUGIN, Confidence.HIGH, "Read from the buy box."
+                )
+
+        if (price := self._buy_box_price(ctx)) is not None:
+            result.fields["price_inr"] = FieldValue.found(
+                price,
+                FieldSource.PLUGIN,
+                Confidence.HIGH,
+                "Read from the buy box, not from a recommendation strip.",
+            )
 
         result.image_candidates = self._rank(found)
         result.notes.append(

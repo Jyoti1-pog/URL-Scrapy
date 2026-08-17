@@ -2,7 +2,7 @@
 
 Turns product page URLs into a haat bulk-listing CSV — honestly.
 
-Point it at your own catalogue, get back `listings.csv` in haat's exact 19-column format, the photos as files ready to upload, and a worklist of the rows that still need a human.
+Point it at your own catalogue, get back `listings.csv` in haat's exact 20-column format, the photos as files ready to upload, and a worklist of the rows that still need a human.
 
 There is a command line and a local web console. They run the same code.
 
@@ -33,10 +33,11 @@ Start with **Find photos**. Paste a catalogue or upload a CSV — it detects the
 
 ## The two CSVs
 
-haat's template is nineteen columns and none is an image, so every run produces both:
+haat's template ends with one `image_urls` cell — pipe-separated, with no room for which photo
+passed which check or why the others did not. So every run produces both:
 
 ```
-listings.csv               19 columns  →  upload this to haat
+listings.csv               20 columns  →  upload this to haat
 listings_with_images.csv   + every photo URL, size, method  →  for your records
 ```
 

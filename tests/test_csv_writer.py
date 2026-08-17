@@ -72,7 +72,12 @@ def test_columns_match_the_template_exactly():
     with TEMPLATE.open("r", encoding="utf-8", newline="") as handle:
         header = next(csv.reader(handle))
     assert list(HAAT_COLUMNS) == header
-    assert len(HAAT_COLUMNS) == 19
+    # Pinned to the template rather than to a number. It was 19 with no image
+    # column among them; haat added `image_urls` as the twentieth and this test
+    # went on passing an assertion about a count while the contract moved. The
+    # count now comes from the file the contract lives in.
+    assert len(HAAT_COLUMNS) == len(header)
+    assert header[-1] == "image_urls"
 
 
 def test_csv_header_locked_and_ordered(tmp_path, app_config):
@@ -355,7 +360,7 @@ def test_review_is_rewritten_not_appended(tmp_path, app_config):
 def test_cell_depths_is_one_character_per_locked_column(app_config: AppConfig) -> None:
     """The grid is a picture of the CSV, so its width has to be the CSV's."""
     record = new_record("https://shop.example/p/1", Provenance.OWN)
-    assert len(cell_depths(record)) == len(HAAT_COLUMNS) == 19
+    assert len(cell_depths(record)) == len(HAAT_COLUMNS)
 
 
 def test_cell_depths_encodes_confidence_not_just_presence(app_config: AppConfig) -> None:
@@ -385,8 +390,15 @@ def test_gi_region_is_locked_in_the_grid_not_merely_empty(app_config: AppConfig)
     assert cell_depths(empty)[index] == "-"
 
     full = new_record("https://shop.example/p/2", Provenance.OWN)
-    for name in HAAT_COLUMNS:
-        if name != "gi_region" and hasattr(full, name):
-            setattr(full, name, FieldValue.found("x", FieldSource.JSONLD, Confidence.HIGH))
+    field_backed = [n for n in HAAT_COLUMNS if n != "gi_region" and hasattr(full, n)]
+    for name in field_backed:
+        setattr(full, name, FieldValue.found("x", FieldSource.JSONLD, Confidence.HIGH))
     assert cell_depths(full)[index] == "-"
-    assert "0" not in cell_depths(full).replace("-", "")
+
+    # Every column that IS a field is dyed. `image_urls` is not one -- it is
+    # composed at write time from what the image pipeline resolved -- so it is
+    # legitimately undyed on a record with no photographs, and checking it here
+    # would be checking the image pipeline from the wrong place.
+    depths = cell_depths(full)
+    for name in field_backed:
+        assert depths[HAAT_COLUMNS.index(name)] != "0", f"{name} should be dyed"

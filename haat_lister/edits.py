@@ -37,10 +37,21 @@ log = get_logger(__name__)
 
 # Never editable, and named rather than merely omitted so the refusal can
 # explain itself.
-LOCKED: frozenset[str] = frozenset({"gi_region"})
+#
+# `gi_region` because a GI tag is a government certification and not the
+# operator's to assert here.
+#
+# `image_urls` for a different reason and it is worth stating: it is not a
+# field on the record at all. It is composed at write time from what the image
+# pipeline actually resolved, so there is nothing for an edit to attach to and
+# a value typed here would be silently discarded on the next re-export.
+# Photographs added by hand belong in the CSV, which is the file that keeps
+# them.
+LOCKED: frozenset[str] = frozenset({"gi_region", "image_urls"})
 
-# The 18 writable columns. Derived from the header so a column added to the CSV
-# cannot silently become uneditable, or editable, without someone deciding.
+# The writable columns. Derived from the header so a column added to the CSV
+# cannot silently become uneditable, or editable, without someone deciding --
+# which is exactly what happened when haat added a twentieth.
 EDITABLE: frozenset[str] = frozenset(HAAT_COLUMNS) - LOCKED
 
 INTEGER_FIELDS: frozenset[str] = frozenset(

@@ -384,10 +384,19 @@ fields:
 # PRICE + FX
 # ---------------------------------------------------------------------------
 price:
-  # Default is `blank` on purpose. haat wants the maker's INR price, which is a
-  # business decision -- not the scraped retail price of some other shop. The
-  # source amount and currency always reach review.csv so a human can set it.
-  strategy: blank        # blank | copy | convert | markup
+  # `copy` writes the price the source page showed, unchanged, when it is
+  # already INR.
+  #
+  # This shipped as `blank` and the reasoning still holds: haat wants the
+  # MAKER's price, which is a business decision, and the retail price on
+  # someone else's shop is not automatically it. Set here to `copy` because the
+  # operator asked for the exact price and it is their catalogue -- but read
+  # the sentence above before a large run, because a copied price is the one
+  # field in this file that costs money when it is wrong in either direction.
+  #
+  # The source amount and currency still reach review.csv either way, so the
+  # number remains checkable.
+  strategy: copy         # blank | copy | convert | markup
   markup_percent: null   # only used with `markup`; --price-strategy markup:15
 
 fx:

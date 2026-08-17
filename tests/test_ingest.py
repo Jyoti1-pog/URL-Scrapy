@@ -115,7 +115,7 @@ async def resolve_for(settings: Settings, client, mode=ImageMode.MANIFEST):
 
 
 # --------------------------------------------------------------------------
-# §8 test 11 -- the export reaches the 19 columns
+# §8 test 11 -- the export reaches haat's columns
 # --------------------------------------------------------------------------
 
 
@@ -128,7 +128,7 @@ async def test_seller_export_maps_to_19_columns(tuned: Settings, export_file) ->
     row = dict(zip(HAAT_COLUMNS, row_values(record, tuned.config, ImageMode.MANIFEST), strict=True))
 
     assert list(row.keys()) == list(HAAT_COLUMNS)
-    assert len(row) == 19
+    assert len(row) == len(HAAT_COLUMNS)
     assert row["title"] == "Indigo block-print kurta"
     assert row["price_inr"] == "2499"
     assert row["weight_g"] == "320"
@@ -318,7 +318,7 @@ async def test_saved_page_and_live_fetch_produce_identical_row(
 ) -> None:
     """§8 test 13. The strongest statement that this is not a second pipeline.
 
-    Compared on the 19 columns rather than on the record, because the columns
+    Compared on the columns rather than on the record, because the columns
     are what haat receives and the record legitimately differs -- `fetch_stage`
     says `saved_page` for one and `static` for the other, which is exactly the
     difference that SHOULD survive.
@@ -559,7 +559,7 @@ def test_csv_and_tsv_are_both_read(tmp_path) -> None:
 
 
 def _columns(record, settings: Settings) -> dict[str, str]:
-    """The 19 columns as haat receives them."""
+    """The columns as haat receives them."""
     from haat_lister.output.csv_writer import HAAT_COLUMNS, row_values
 
     values = row_values(record, settings.config, ImageMode.MANIFEST)

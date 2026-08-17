@@ -113,7 +113,9 @@ def test_the_table_carries_confidence_and_source_per_cell(client: TestClient) ->
 
     assert page["total"] == 3
     assert page["columns"][0] == "title"
-    assert len(page["rows"][0]["cells"]) == 19
+    from haat_lister.output.csv_writer import HAAT_COLUMNS
+
+    assert len(page["rows"][0]["cells"]) == len(HAAT_COLUMNS)
 
     cells = cells_of(page["rows"][0])
     assert cells["title"]["value"] == "Product 0"
@@ -174,7 +176,12 @@ def test_gi_region_patch_rejected(client: TestClient) -> None:
 def test_gi_region_is_not_in_the_editable_set() -> None:
     assert "gi_region" in LOCKED
     assert "gi_region" not in EDITABLE
-    assert len(EDITABLE) == 18
+    # Derived from the header minus what is locked, never a literal: the count
+    # was hardcoded at 18 and haat then added a twentieth column.
+    from haat_lister.output.csv_writer import HAAT_COLUMNS
+
+    assert len(EDITABLE) == len(HAAT_COLUMNS) - len(LOCKED)
+    assert "image_urls" in LOCKED, "composed at write time; an edit has nothing to attach to"
 
 
 def test_row_patch_validates_against_taxonomy(client: TestClient) -> None:
@@ -324,7 +331,7 @@ def test_undoing_an_edit_restores_what_the_page_said(client: TestClient) -> None
 
 
 def test_a_reexport_is_byte_identical_where_nothing_was_edited(client: TestClient) -> None:
-    """Same header, same order, same 19 columns -- the re-export goes through
+    """Same header, same order, same columns -- the re-export goes through
     the same writer the live run used."""
     job_id = run_job(client, 4)
     before = client.get(f"/api/jobs/{job_id}/download/listings").content

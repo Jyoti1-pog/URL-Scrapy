@@ -1,12 +1,13 @@
 """v4 Phase 5: the export that carries image links.
 
-haat's template is nineteen columns and none of them is an image, so the file
+haat's template ends with one `image_urls` cell, which is not enough for a
+record of what was found and how, so the file
 that imports cannot be the file that carries photo URLs. Two files, then -- and
 the entire risk of two files is that they disagree.
 
 So the tests here are mostly about the relationship between them: identical row
 order keyed on source_url, a header that does not change shape between runs, and
-an import file that is still exactly nineteen columns however much the companion
+an import file that still matches haat's header exactly however much the companion
 grows.
 """
 
@@ -78,11 +79,16 @@ def read(path: Path) -> tuple[list[str], list[list[str]]]:
 # --------------------------------------------------------------------------
 
 
-def test_listings_csv_still_19_columns(settings: Settings, tmp_path: Path) -> None:
-    """§10 test 15, and the guard that keeps the import file safe.
+def test_listings_csv_matches_haats_header_exactly(settings: Settings, tmp_path: Path) -> None:
+    """The guard that keeps the import file safe.
 
-    Everything else in this phase is additive; this is the line it must not
-    cross. A twentieth column here is an import that fails at haat's end.
+    Everything the companion adds is additive; this is the line it must not
+    cross. An EXTRA column here is an import that fails at haat's end.
+
+    It used to assert the literal 19, and haat then published a template with
+    `image_urls` as a twentieth -- so the assertion went on passing about a
+    number while the contract moved underneath it. Pinned to `HAAT_COLUMNS`,
+    which is itself pinned to the template file by `test_csv_writer`.
     """
     from haat_lister.output.csv_writer import HaatCsvWriter
 
@@ -92,17 +98,21 @@ def test_listings_csv_still_19_columns(settings: Settings, tmp_path: Path) -> No
 
     header, rows = read(path)
     assert header == list(HAAT_COLUMNS)
-    assert len(header) == 19
-    assert all(len(row) == 19 for row in rows)
+    assert all(len(row) == len(HAAT_COLUMNS) for row in rows)
+    # The companion's own columns stay out of the import file. `image_urls` is
+    # haat's twentieth and belongs; `image_url` and `image_1` are ours and do
+    # not -- names close enough that only an exact check is worth anything.
     assert "image_url" not in header
+    assert "image_1" not in header
+    assert header[-1] == "image_urls"
     assert "source_url" not in header
 
 
 def test_the_companion_starts_with_exactly_the_import_file(
     settings: Settings, tmp_path: Path
 ) -> None:
-    """Anything reading the first nineteen columns of the companion gets
-    `listings.csv`. The image columns are appended, never interleaved."""
+    """Anything reading the companion's leading columns gets `listings.csv`.
+    The extra image columns are appended, never interleaved."""
     path = tmp_path / "listings_with_images.csv"
     with_images.write(
         path, [record("https://shop.example/p/1", "Kurta", 2, ImageMethod.DIRECT)],
@@ -110,8 +120,8 @@ def test_the_companion_starts_with_exactly_the_import_file(
     )
 
     header, rows = read(path)
-    assert header[:19] == list(HAAT_COLUMNS)
-    assert header[19] == "source_url"
+    assert header[: len(HAAT_COLUMNS)] == list(HAAT_COLUMNS)
+    assert header[len(HAAT_COLUMNS)] == "source_url"
     assert len(rows[0]) == len(header)
 
 
@@ -148,8 +158,10 @@ def test_listings_and_with_images_row_correspondence(
     assert len(listing_rows) == len(companion_rows)
     url_column = companion_header.index("source_url")
     for index, (plain, extended) in enumerate(zip(listing_rows, companion_rows, strict=True)):
-        # The nineteen columns are identical, cell for cell.
-        assert plain == extended[:19], f"row {index} differs between the two files"
+        # haat's columns are identical, cell for cell.
+        assert plain == extended[: len(HAAT_COLUMNS)], (
+            f"row {index} differs between the two files"
+        )
         assert extended[url_column], "the companion lost the URL it exists to carry"
 
 
@@ -257,10 +269,10 @@ def test_master_gets_the_same_pair_deduped_identically(
     extended_header, extended_rows = read(companion)
 
     assert plain_header == list(HAAT_COLUMNS)
-    assert extended_header[:19] == list(HAAT_COLUMNS)
+    assert extended_header[: len(HAAT_COLUMNS)] == list(HAAT_COLUMNS)
     assert len(plain_rows) == len(extended_rows) == 2
     for plain, extended in zip(plain_rows, extended_rows, strict=True):
-        assert plain == extended[:19]
+        assert plain == extended[: len(HAAT_COLUMNS)]
     assert extended_rows[0][extended_header.index("image_url")].endswith("/img/0.jpg")
 
 

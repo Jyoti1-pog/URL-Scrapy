@@ -56,7 +56,19 @@ HAAT_COLUMNS: tuple[str, ...] = (
     "rfq_min_qty",
     "bulk_only",
     "seller_note",
+    # The twentieth. haat's template carries the product's photo URLs here,
+    # pipe-separated, and this tool spent its whole life assuming the header
+    # was nineteen columns with no image among them -- so every photograph it
+    # found went into a companion file marked "not for uploading".
+    #
+    # Written in the template's own separator, " | ", which is what its sample
+    # row uses. It is also the column an operator fills by hand when a shop
+    # refuses us: the automatic path leaves it empty rather than absent.
+    "image_urls",
 )
+
+# How the template separates several photo URLs inside the one cell.
+IMAGE_URL_SEPARATOR = " | "
 
 # A GI tag is an Indian government certification and haat's form makes it a
 # seller-ticked declaration. The extractor's model has no gi_region field, so
@@ -130,6 +142,7 @@ def row_values(record: ProductRecord, cfg: AppConfig, mode: ImageMode, multi: in
         number("rfq_min_qty"),
         text("bulk_only"),
         text("seller_note"),
+        _clean(IMAGE_URL_SEPARATOR.join(_listable_photo_urls(record)), prefixes),
     ]
     assert len(values) == len(HAAT_COLUMNS), "row width drifted from the locked header"
 
@@ -139,6 +152,39 @@ def row_values(record: ProductRecord, cfg: AppConfig, mode: ImageMode, multi: in
         values.extend((hosted[i] if i < len(hosted) else "") for i in range(multi))
 
     return values
+
+
+def _listable_photo_urls(record: ProductRecord) -> list[str]:
+    """The photo URLs that belong in a haat listing, one photograph each.
+
+    Only URLs a BUYER could load. A local file path is not one, and neither is
+    an inlined `data:` blob from a saved page -- both are real photographs and
+    neither is something haat can fetch, so they stay in the manifest and this
+    cell stays empty rather than carrying something that renders as a broken
+    image on a live listing.
+
+    Empty is also what an operator needs when the automatic path found nothing:
+    a blank cell in the file they are already editing, rather than a column
+    that is not there.
+    """
+    from ..extract.images import photo_identity
+
+    urls: list[str] = []
+    if record.image.url:
+        urls.append(record.image.url)
+    urls.extend(f.hosted_url for f in record.image.files if f.hosted_url)
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for url in urls:
+        if not url or url.startswith("data:") or not url.startswith(("http://", "https://")):
+            continue
+        key = photo_identity(url)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(url)
+    return out
 
 
 # The console's fill grid, encoded one character per column, in header order.
@@ -165,6 +211,13 @@ def cell_depths(record: ProductRecord) -> str:
     for name in HAAT_COLUMNS:
         if name == "gi_region":
             out.append("-")
+            continue
+        if name == "image_urls":
+            # Not a FieldValue -- it is composed at write time from what the
+            # image pipeline resolved, so it has no confidence to read. Dyed
+            # by whether a buyer-loadable URL exists, which is the only thing
+            # the grid can honestly say about it.
+            out.append("3" if _listable_photo_urls(record) else "0")
             continue
         value = fields.get(name)
         if value is None or not value.is_present:
