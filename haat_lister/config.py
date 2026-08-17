@@ -254,6 +254,24 @@ class FieldsConfig(_Section):
     bulk_only_default: str = ""
     required_by_haat: list[str] = Field(default_factory=list)
 
+    # --- what goes in `seller_note` --------------------------------------
+    #
+    # haat's nineteen columns have nowhere to record WHERE a row came from, and
+    # `seller_note` is the only free-text field among them. Six weeks after an
+    # import, "which page was this?" is the question that gets asked, and
+    # without this the answer lives only in the ledger.
+    #
+    # Off by default is not the useful default here: a note nobody asked for is
+    # a cell an operator can delete, and a provenance trail nobody kept is gone.
+    seller_note_includes_source: bool = True
+    # Details worth repeating in the note even though several have their own
+    # column. Weight above all: it is what customs charges on, and seeing it
+    # beside the source link is how a wrong one gets noticed.
+    seller_note_includes_details: bool = True
+    # The operator's own `--seller-note` always comes first when both are set.
+    # Theirs is a message; ours is a footnote.
+    seller_note_separator: str = " · "
+
 
 class PriceConfig(_Section):
     strategy: PriceStrategy = PriceStrategy.BLANK
@@ -269,7 +287,15 @@ class FxConfig(_Section):
 
 class HsCodesConfig(_Section):
     by_category: dict[str, str] = Field(default_factory=dict)
-    by_material_keyword: dict[str, str] = Field(default_factory=dict)
+    # category -> keyword -> code. NESTED, and the nesting is the point.
+    #
+    # Flat keywords hijack every shelf: `brass` meant imitation jewellery
+    # (7117), so a brass BELL filed under `more-crafts` was handed a jewellery
+    # heading. HS classification does not work that way -- the shelf narrows
+    # it, and the description resolves the fork WITHIN the shelf. "925 silver
+    # necklace" and "oxidised brass necklace" are both jewellery and are not
+    # the same heading; a sterling silver spoon is neither.
+    by_material_keyword: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class PolicyConfig(_Section):
@@ -855,12 +881,44 @@ def collect_findings(s: Settings, mode: ImageMode | None = None) -> list[Finding
     return [
         *_identity_findings(s),
         *_codec_findings(),
+        *_hs_findings(s),
         *_taxonomy_findings(s),
         *_mode_findings(s, mode),
         *_field_policy_findings(s),
         *_plugin_findings(s),
         *_llm_findings(s),
         *_invariant_findings(),
+    ]
+
+
+def _hs_findings(s: Settings) -> list[Finding]:
+    """Which shelves still have no HS suggestion, by name.
+
+    Reported rather than discovered: without it the symptom is a column of
+    blanks and a review queue the length of the catalogue, which reads as a
+    bug in the extractor rather than as a table nobody has filled in.
+
+    A category listed here is not broken. It means the heading genuinely
+    depends on the product -- `handwoven-textiles` spans unstitched fabric,
+    made-up stoles and home linen, which are three different chapters -- so a
+    single code for the shelf would be wrong for most of it.
+    """
+    mapped = set(s.config.hs_codes.by_category)
+    unmapped = sorted(set(s.taxonomy.categories) - mapped)
+    if not unmapped:
+        return []
+    return [
+        Finding(
+            level="info",
+            title=f"No HS code for {len(unmapped)} categor{'y' if len(unmapped) == 1 else 'ies'}",
+            detail=(
+                f"{', '.join(unmapped)}. Rows on those shelves get a blank `hs_code` and reach "
+                "review, unless a material keyword in the description matches. That is the "
+                "honest outcome where one heading cannot cover a shelf -- it is only a problem "
+                "if you know the right code and have not written it down."
+            ),
+            fix="config.yaml -> hs_codes.by_category, or a keyword under by_material_keyword",
+        )
     ]
 
 

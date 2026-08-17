@@ -348,3 +348,51 @@ def test_hosted_image_on_a_third_party_row_is_a_hard_error():
     record.image = ImageResult(method=ImageMethod.HOSTED, url="https://host.example/x.jpg")
     with pytest.raises(AssertionError, match="must not upload"):
         apply_gate(record, DescriptionMode.REWRITE)
+
+
+def test_a_material_keyword_cannot_hijack_another_shelf(app_config):
+    """A brass BELL is not imitation jewellery.
+
+    Keywords were global, so `brass` -- on the list to move imitation pieces
+    from 7113 to 7117 -- was applied to a brass bell filed under `more-crafts`
+    and handed it a jewellery heading. HS classification does not work that
+    way: the shelf narrows the heading and the description resolves the fork
+    within it. `sterling silver` is 7113 on a necklace and cutlery on a spoon.
+    """
+    bell = make_record("Brass bell")
+    bell.category_slug = FieldValue.found("more-crafts", FieldSource.INFERRED)
+    assert suggest(bell, app_config.hs_codes).hs_code.value is None
+
+    necklace = make_record("Oxidised brass necklace")
+    necklace.category_slug = FieldValue.found("jewellery", FieldSource.INFERRED)
+    assert suggest(necklace, app_config.hs_codes).hs_code.value == "7117"
+
+
+def test_the_description_resolves_the_fork_within_a_shelf(app_config):
+    """What "auto-assign from the description" actually buys.
+
+    Both of these are `jewellery`, and they are not the same customs heading.
+    A category-only table would give them both 7113 and be wrong about one.
+    """
+    silver = make_record("925 sterling silver pendant")
+    silver.category_slug = FieldValue.found("jewellery", FieldSource.INFERRED)
+    plated = make_record("Artificial gold-plated jhumka")
+    plated.category_slug = FieldValue.found("jewellery", FieldSource.INFERRED)
+
+    assert suggest(silver, app_config.hs_codes).hs_code.value == "7113"
+    assert suggest(plated, app_config.hs_codes).hs_code.value == "7117"
+
+
+def test_a_suggested_code_is_still_labelled_a_suggestion(app_config):
+    """Auto-assigning fills the cell; it does not make the number a fact.
+
+    The row still reaches review, because an HS code is a customs declaration
+    and a wrong one is the seller's legal problem rather than a cosmetic one.
+    """
+    record = make_record("925 sterling silver pendant")
+    record.category_slug = FieldValue.found("jewellery", FieldSource.INFERRED)
+    result = suggest(record, app_config.hs_codes)
+
+    assert result.hs_code.confidence is Confidence.MEDIUM
+    assert "SUGGESTION" in " ".join(result.notes)
+    assert "confirm it before importing" in " ".join(result.notes)

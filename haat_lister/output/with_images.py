@@ -37,11 +37,14 @@ from .csv_writer import HAAT_COLUMNS, _clean, row_values
 
 log = get_logger(__name__)
 
-# How many `image_N` columns. Six is the default because that is
-# `--max-images`' default and because a listing with more than six photos is
-# rare enough that the seventh belongs in the manifest rather than in every row
-# of a spreadsheet.
-DEFAULT_MAX_IMAGES = 6
+# How many `image_N` columns. Ten, matching `images.max_images_per_product`, so
+# a row that found ten photographs has ten cells to put them in -- at six, four
+# of them existed only in the manifest and an operator filling gaps by hand had
+# nowhere to type them.
+#
+# Fixed width on purpose: a job whose products have one photo and a job whose
+# products have ten produce the same header, so the two files concatenate.
+DEFAULT_MAX_IMAGES = 10
 
 # Appended AFTER the nineteen, never interleaved. Anything that reads the first
 # nineteen columns of this file gets exactly `listings.csv`.
@@ -51,6 +54,13 @@ def image_columns(max_images: int = DEFAULT_MAX_IMAGES) -> tuple[str, ...]:
         "image_url",
         *(f"image_{i}" for i in range(1, max_images + 1)),
         "image_count",
+        # What we found and did NOT use, so a row with no photo is still a
+        # starting point rather than a dead end. These used to be mixed into
+        # `image_1..N` and counted in `image_count`, which is how a five-photo
+        # product reported 55. Named for what they are, they are useful: when
+        # the automatic path gives you nothing, these are the URLs it looked at
+        # and the `image_reason` says why each was refused.
+        "rejected_image_urls",
         "image_method",
         "image_reason",
         "image_width",
@@ -64,26 +74,51 @@ def header(max_images: int = DEFAULT_MAX_IMAGES) -> tuple[str, ...]:
 
 
 def _all_image_urls(record: ProductRecord) -> list[str]:
-    """Every photo we have for this row, best first, deduplicated.
+    """The PHOTOGRAPHS this row has, best first.
 
-    The validated winner leads because it is the one that passed the nine
-    predicates. Behind it come the local files' original URLs, then the
-    remaining candidates -- which are unvalidated and labelled as such by their
-    position rather than by a separate column nobody would read.
+    Two things this deliberately no longer does.
+
+    It used to append `record.image_candidates` -- every URL the extractor
+    considered, most of them never validated and some of them rejected. The
+    docstring called them "labelled as such by their position", which nothing
+    in the file actually says, and `image_count` then reported the lot: a
+    two-product job read `image_count 42` and `55` for products with eight and
+    five photographs. A count of guesses under a column called `image_count` is
+    the same defect as a count of URLs under a column called photos.
+
+    And it counted size variants separately. `71rOScyvhRL.jpg` and
+    `71rOScyvhRL._SL1500_.jpg` are one photograph at two resolutions, so
+    `photo_identity` collapses them and the first (best-ranked) survives.
     """
+    from ..extract.images import photo_identity
+
     urls: list[str] = []
     if record.image.url:
         urls.append(record.image.url)
     urls.extend(f.hosted_url or f.original_source_url for f in record.image.files)
-    urls.extend(record.image_candidates)
 
     seen: set[str] = set()
     ordered: list[str] = []
     for url in urls:
-        if url and url not in seen:
-            seen.add(url)
-            ordered.append(url)
+        if not url:
+            continue
+        key = photo_identity(url)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(url)
     return ordered
+
+
+def _rejected_urls(record: ProductRecord) -> list[str]:
+    """Candidates that were considered and not used, best-ranked first.
+
+    Deliberately not deduplicated by photograph: if the full-size guess was
+    refused and the published URL was not tried, an operator working by hand
+    wants to see both.
+    """
+    used = {url for url in _all_image_urls(record)}
+    return [url for url in record.image_candidates if url and url not in used]
 
 
 def image_values(
@@ -105,6 +140,7 @@ def image_values(
         _clean(record.image.url, prefixes),
         *(_clean(u, prefixes) for u in padded),
         str(len(urls)),
+        _clean(" | ".join(_rejected_urls(record)), prefixes),
         record.image.method.value,
         # The closed-enum word where there is one, the diagnostic string
         # otherwise. An operator filtering this column wants to group on it.

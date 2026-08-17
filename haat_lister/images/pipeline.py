@@ -129,6 +129,41 @@ def _candidate_reason(candidates: list[str], fallback: NoImageReason) -> NoImage
     return NoImageReason.NO_IMAGE_CANDIDATES if not candidates else fallback
 
 
+def _the_products_own_photos(candidates: list[str], page_url: str) -> list[str]:
+    """Drop the shop's furniture when the page told us which images are the product.
+
+    When some candidates share words with the page's URL and others do not, the
+    ones that do are the gallery and the ones that do not are the site's
+    chrome -- on the page that prompted this, `Women_inch_india.jpg` and
+    `womens-size-in-cms_mob.jpg`, two size charts downloaded and written into a
+    listing as product photographs.
+
+    Ranking alone was not enough: it put the gallery first, and the download
+    budget was then large enough to reach the chrome behind it.
+
+    Order is untouched, and so are the FALLBACKS -- each photo's best URL is
+    followed by its alternates, and a variant of a gallery image shares the
+    slug just as the primary does. Deduplicating here instead is what broke
+    that once; the identity check lives in `download_candidates` for that
+    reason.
+
+    When NO candidate matches -- a shop naming its files `99937_2.jpg` --
+    nothing is filtered and the ranking stands.
+    """
+    if not page_url:
+        return candidates
+
+    from ..extract.images import _slug_affinity, slug_tokens
+
+    tokens = slug_tokens(page_url)
+    # A `data:` candidate is a photograph the operator's own saved page carried,
+    # inlined -- it has no filename to match a slug against, and there is no
+    # question about whose product it is. Filtering it out sent a saved-page row
+    # back to the CDN that refused the page in the first place.
+    named = [u for u in candidates if u.startswith("data:") or _slug_affinity(u, tokens) > 0]
+    return named if named else candidates
+
+
 class ImageResolver:
     """Resolves one record's images. Holds the validator, downloader and hosts."""
 
@@ -274,9 +309,14 @@ class ImageResolver:
         raw_dir = root / cfg.paths.downloads_dir / record.row_key
         out_dir = root / cfg.paths.images_dir / record.row_key
 
+        # One URL per PHOTOGRAPH, best-ranked first. The candidate list carries
+        # a full-size guess beside the published URL for the same picture, and
+        # downloading both spent the per-product budget on resolutions of the
+        # same saree: five distinct photographs on the page became two files,
+        # because three of the ten slots went to variants of the first two.
         downloaded = await download_candidates(
             self._client,
-            record.image_candidates,
+            _the_products_own_photos(record.image_candidates, record.source_url),
             raw_dir,
             cfg.images,
             cfg.fetch,

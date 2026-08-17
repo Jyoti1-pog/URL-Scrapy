@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 from selectolax.parser import HTMLParser
 
-from .config import RenderConfig, Settings
+from .config import FieldsConfig, RenderConfig, Settings
 from .enrich.category import classify, validate_slugs
 from .enrich.fx import convert as convert_price
 from .enrich.hs_code import suggest as suggest_hs_code
@@ -906,10 +906,58 @@ def apply_policy_defaults(
             fields.bulk_only_default, FieldSource.POLICY_DEFAULT, Confidence.HIGH
         )
 
-    if seller_note:
-        record.seller_note = FieldValue.found(
-            seller_note, FieldSource.OPERATOR, Confidence.HIGH
-        )
+    note = _compose_seller_note(record, fields, seller_note)
+    if note:
+        # OPERATOR when they wrote any of it, because the whole string is then
+        # partly theirs and `review.csv` should not claim we inferred it.
+        source = FieldSource.OPERATOR if seller_note else FieldSource.POLICY_DEFAULT
+        record.seller_note = FieldValue.found(note, source, Confidence.HIGH)
+
+
+def _compose_seller_note(
+    record: ProductRecord, fields: FieldsConfig, operator_note: str | None
+) -> str:
+    """The operator's own words, then where the row came from, then the facts.
+
+    WHY THE SOURCE LINK LIVES HERE. haat's nineteen columns have nowhere to
+    record which page a row was built from, and `seller_note` is the only
+    free-text field among them. Six weeks after an import, "which page was
+    this?" is the question that actually gets asked, and without this the
+    answer is only in the ledger -- which is not what anybody opens.
+
+    WHY THE WEIGHT IS REPEATED. It has its own column, and it is also the
+    number customs charges on. Seeing `320 g` beside the link is how a wrong
+    one gets noticed by the person who knows the product, rather than by a
+    customs broker later.
+
+    Only values the page actually yielded appear. A missing weight leaves the
+    note shorter rather than saying "weight: unknown", because a note listing
+    what is absent is a longer way of writing a blank cell.
+    """
+    parts: list[str] = []
+    if operator_note:
+        parts.append(operator_note)
+
+    if fields.seller_note_includes_source and record.source_url:
+        parts.append(f"Source: {record.source_url}")
+
+    if fields.seller_note_includes_details:
+        if record.weight_g.is_present:
+            parts.append(f"Weight: {record.weight_g.value} g")
+        axes = [record.length_cm, record.width_cm, record.height_cm]
+        if all(axis.is_present for axis in axes):
+            parts.append(
+                f"Size: {axes[0].value} x {axes[1].value} x {axes[2].value} cm"
+            )
+        if record.sizes.is_present:
+            parts.append(f"Options: {record.sizes.value}")
+        if record.source_price is not None and record.source_currency:
+            # What the page said, not what we are listing at. Those differ on
+            # purpose -- `price_inr` is the maker's decision -- and recording
+            # the observed one makes the difference auditable.
+            parts.append(f"Listed on source at {record.source_price:g} {record.source_currency}")
+
+    return fields.seller_note_separator.join(parts)
 
 
 def _apply_extraction_flags(record: ProductRecord) -> None:

@@ -190,7 +190,16 @@ def test_a_row_with_no_photo_still_says_why(settings: Settings, tmp_path: Path) 
     assert row["image_reason"] == "all_candidates_rejected"
     assert row["image_url"] == ""
     # The candidates are still listed: they are what an operator would check.
-    assert row["image_1"].endswith("/img/0.jpg")
+    # The numbered columns hold PHOTOGRAPHS, and this row has none -- so they
+    # are empty and `image_count` agrees with them. They used to be filled with
+    # unvalidated candidates, which is how a five-photo product reported 55.
+    assert row["image_1"] == ""
+    assert row["image_count"] == "0"
+
+    # What was considered and refused is still here, under its own name, so a
+    # row the automatic path could not finish is a starting point for doing it
+    # by hand rather than a dead end.
+    assert "/img/0.jpg" in row["rejected_image_urls"]
 
 
 def test_the_hero_leads_and_duplicates_collapse(settings: Settings, tmp_path: Path) -> None:

@@ -26,9 +26,16 @@ class HsResult:
     flags: list[str] = field(default_factory=list)
 
 
-def _material_match(text: str, cfg: HsCodesConfig) -> tuple[str, str] | None:
-    """Material keywords are more specific than category, so they win."""
-    for keyword, code in cfg.by_material_keyword.items():
+def _material_match(text: str, category: str, cfg: HsCodesConfig) -> tuple[str, str] | None:
+    """The description resolves the fork WITHIN a shelf, so the shelf is required.
+
+    Keywords used to be global, and a global keyword hijacks every category: a
+    brass bell in `more-crafts` was handed 7117, imitation jewellery, because
+    `brass` was on the list for the jewellery fork. The shelf comes first
+    because that is how classification actually works -- `sterling silver` is
+    7113 on a necklace and cutlery on a spoon.
+    """
+    for keyword, code in cfg.by_material_keyword.get(category, {}).items():
         if re.search(rf"(?<!\w){re.escape(keyword.lower())}(?!\w)", text):
             return keyword, code
     return None
@@ -39,7 +46,7 @@ def suggest(record: ProductRecord, cfg: HsCodesConfig) -> HsResult:
     text = f"{record.title.value or ''} {record.description.value or ''}".lower()
     category = str(record.category_slug.value or "")
 
-    if found := _material_match(text, cfg):
+    if found := _material_match(text, category, cfg):
         keyword, code = found
         result.hs_code = FieldValue.found(
             code,

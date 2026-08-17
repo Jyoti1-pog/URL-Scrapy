@@ -135,17 +135,35 @@ async def download_candidates(
 ) -> list[DownloadedFile]:
     """Highest-ranked candidates first, skipping any that fail.
 
-    `limit` caps how many photos we keep; it defaults to haat's own ceiling.
+    `limit` caps how many PHOTOGRAPHS we keep, not how many URLs we try, and
+    that distinction is the whole of this function.
+
+    The candidate list is ordered so each photo's best URL is followed
+    immediately by its fallbacks -- a full-size guess that 404s drops straight
+    through to the URL the page actually published. Deduplicating the list
+    BEFORE this loop destroys that: an earlier version did exactly that, the
+    derived Amazon URL 404'd, and the photograph was lost rather than falling
+    back, taking a five-photo product down to one.
+
+    So the list arrives intact and the identity check happens here. A candidate
+    whose photograph we already have is skipped without a request; a fallback
+    for one we do not is still tried.
     """
+    from ..extract.images import photo_identity
+
     wanted = limit or images_cfg.max_images_per_product
     files: list[DownloadedFile] = []
+    have: set[str] = set()
 
     for url in candidates:
         if len(files) >= wanted:
             break
+        if photo_identity(url) in have:
+            continue
         if downloaded := await download_candidate(
             client, url, dest_dir, len(files) + 1, images_cfg, fetch_cfg, referer
         ):
             files.append(downloaded)
+            have.add(photo_identity(url))
 
     return files

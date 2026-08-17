@@ -404,12 +404,67 @@ fx:
 # ships almost empty rather than plausible.
 # ---------------------------------------------------------------------------
 hs_codes:
-  # OPERATOR: only these two are evidenced (from the template samples). Every
-  # other category yields a BLANK cell plus a review flag until you extend this.
+  # HOW THIS RESOLVES: a material keyword found in the title or description wins
+  # over the category, because the description is more specific than the shelf.
+  # "925 silver necklace" and "oxidised brass necklace" are both `jewellery` and
+  # they are NOT the same customs heading.
+  #
+  # Every value here is written into the cell as a SUGGESTION and the row still
+  # reaches review.csv. That is deliberate and is not removed by filling this in:
+  # an HS code is a customs declaration, and a wrong one is the seller's legal
+  # and financial problem, not a cosmetic defect.
+  #
+  # OPERATOR: two of these have a fork your broker should settle before a large
+  # run. They are marked VERIFY below.
+  # NESTED under the category, and the nesting is the point: the shelf narrows
+  # the heading, the description resolves the fork within it. A flat keyword
+  # list hijacks every shelf -- `brass` meant imitation jewellery, so a brass
+  # BELL under `more-crafts` was handed a jewellery heading.
+  by_material_keyword:
+    jewellery:
+      # VERIFY. Precious metal (7113) and imitation (7117) are different duty,
+      # and a shop selling both has rows of each -- which is exactly why this
+      # is read off the description rather than the shelf.
+      "925": "7113"
+      "sterling silver": "7113"
+      "solid gold": "7113"
+      "imitation": "7117"
+      "artificial": "7117"
+      "oxidised": "7117"
+      "oxidized": "7117"
+      "brass": "7117"
+      "german silver": "7117"
+
+    handwoven-textiles:
+      # VERIFY. These are the headings for unstitched FABRIC. A stitched
+      # garment of the same fibre is chapter 61/62 instead, and a made-up
+      # article such as a stole is 6214 -- which is why this shelf has no
+      # category-level code below.
+      "pure silk": "5007"
+      "mulberry silk": "5007"
+      "tussar": "5007"
+      "kanjivaram": "5007"
+      "banarasi": "5007"
+
   by_category:
-    apparel: "6206"      # cotton apparel
-    jewellery: "7113"    # silver jewellery
-  by_material_keyword: {}
+    # Evidenced by haat's own template sample rows.
+    apparel: "6206"           # women's blouses/shirts. Menswear is 6205 --
+                              # VERIFY if you list both; see mens-fashion.
+    jewellery: "7113"         # the precious-metal default; keywords above
+                              # move imitation pieces to 7117.
+    # Unambiguous: 4202 is trunks, suitcases, handbags, wallets and belts, so
+    # it covers all three subcategories of this shelf.
+    leather-bags: "4202"
+    # Deliberately absent: `handwoven-textiles` and `more-crafts`.
+    #
+    # Not an oversight. `handwoven-textiles` spans unstitched fabric, made-up
+    # articles like stoles (6214) and home textiles (63xx), and the right
+    # heading depends on which -- so a single category code would be wrong for
+    # most of the shelf. The keywords above catch the fibre-identified ones and
+    # the rest reach review with a blank, which is the honest outcome.
+    #
+    # `more-crafts` is a catch-all by construction and has no single heading at
+    # all.
 
 # ---------------------------------------------------------------------------
 # WHICH LINKS ARE THE SAME PRODUCT
