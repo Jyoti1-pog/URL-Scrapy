@@ -40,3 +40,6 @@ demo/product.jpg
 # Vite's install and cache. web/dist IS committed (see above).
 web/node_modules/
 web/.vite/
+
+# The delivery ZIP is a build artefact, rebuilt by tools/build_delivery.py.
+/haat-lister-delivery.zip

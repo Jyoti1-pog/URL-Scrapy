@@ -1273,6 +1273,91 @@ async def _import_pages(
 
 
 @app.command()
+def find(
+    source: Annotated[
+        Path, typer.Argument(help="A file of URLs, or a .csv/.tsv whose link column is detected.")
+    ],
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Where to write image_links.csv.")
+    ] = None,
+    concurrency: Annotated[int, typer.Option("--concurrency")] = 4,
+    render: RenderOpt = None,
+    no_cache: Annotated[
+        bool,
+        typer.Option("--no-cache", help="Re-check every URL rather than reuse an earlier look."),
+    ] = False,
+    config: ConfigOpt = None,
+    verbose: VerboseOpt = 0,
+    log_file: LogFileOpt = None,
+) -> None:
+    """Every photo for every product. Writes no listing and calls no image host.
+
+    A look, not a job -- which is why there is no `--provenance` here. Nothing
+    is listed, nothing is re-hosted, and the only file it writes is a report
+    about photographs. The provenance question is asked when a row is about to
+    become a listing, and no row here is.
+    """
+    import asyncio
+
+    from .find import find_photos
+    from .output.find_csv import read_table, write_image_links
+    from .utils.logging import setup_logging
+    from .utils.urls import extract_urls
+
+    setup_logging(verbose, log_file)
+    settings = _load_settings(config)
+
+    try:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        console.print(_error_panel(str(exc), "Could not read that file"))
+        raise typer.Exit(code=2) from exc
+
+    # A spreadsheet gets its link column detected and its other columns carried
+    # through; anything else is scanned for URLs. Same two routes the console
+    # offers, because they are the same two shapes an operator actually has.
+    extras: list[dict[str, str]] = []
+    extra_columns: list[str] = []
+    if source.suffix.lower() in (".csv", ".tsv"):
+        table = read_table(text)
+        urls, extras = table.urls, table.extras
+        extra_columns = [c for c in table.columns if c != table.url_column]
+    else:
+        urls = [item.url for item in extract_urls(text).urls]
+
+    if not urls:
+        console.print(_error_panel(f"No links found in {source.name}.", "Nothing to look at"))
+        raise typer.Exit(code=2)
+
+    rows: list = []
+    stats = asyncio.run(
+        find_photos(
+            urls,
+            settings,
+            extras=extras or None,
+            concurrency=concurrency,
+            render=render,
+            use_cache=not no_cache,
+            on_row=rows.append,
+        )
+    )
+
+    destination = out or (settings.root / "image_links.csv")
+    ordered = sorted(rows, key=lambda r: r.index)
+    written = write_image_links(destination, ordered, settings.config, extra_columns or None)
+
+    with_photo = sum(1 for r in ordered if r.image_count)
+    console.print()
+    console.print(
+        f"  {stats.done} of {stats.total} looked at   "
+        f"[green]{with_photo} with a photo[/green]   "
+        f"{stats.done - with_photo} without"
+    )
+    console.print(f"  {written} row(s) -> {destination}")
+    raise typer.Exit(code=0)
+
+
+@app.command()
 def preflight(
     source: Annotated[
         Path, typer.Argument(help="A file of URLs, one per line (or anything containing them).")

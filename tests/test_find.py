@@ -396,3 +396,25 @@ def test_an_unknown_or_malformed_find_is_a_404_not_a_500(
     """The find id is the only path component a client supplies here, so its
     shape is a control -- same rule as the job download routes."""
     assert client.get(f"/api/find/{find_id}").status_code == 404
+
+
+def test_the_find_command_exists_and_needs_no_provenance() -> None:
+    """The README documents `haat-lister find`, so it has to be a command.
+
+    It was documented and absent -- Find photos was console-only -- which is
+    the worst shape for a handover: the page a new operator reads first tells
+    them to run something that does not exist.
+
+    No `--provenance` here, and that is deliberate rather than an oversight:
+    nothing is listed, nothing is re-hosted, and the only file written is a
+    report about photographs. The provenance question is asked when a row is
+    about to become a listing, and no row here is.
+    """
+    import inspect
+
+    from haat_lister.cli import find
+
+    parameters = inspect.signature(find).parameters
+    assert "provenance" not in parameters
+    assert {"source", "out", "concurrency", "no_cache"} <= set(parameters)
+    assert find.__doc__ and "calls no image host" in find.__doc__
