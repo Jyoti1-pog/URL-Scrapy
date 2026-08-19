@@ -34,10 +34,12 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows
 source .venv/bin/activate         # macOS / Linux
 
-pip install -e .
+pip install -e "."
 ```
 
-That last line takes two or three minutes.
+That last line takes two or three minutes. The `"."` at the end is part of the
+command — it is what tells pip to install *this folder*. Leave it off and pip
+answers `-e option requires 1 argument`.
 
 **Optional**, and only if you want the browser fallback for shops that build
 their pages with JavaScript:
