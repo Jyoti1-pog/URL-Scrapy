@@ -77,6 +77,8 @@ REQUIRED = [
     "taxonomy.yaml",
     ".env.example",
     "START-HERE.md",
+    "START-HERE.pdf",       # the page a non-technical client will actually open
+    "START-HERE.docx",
     "README.md",
     "haat-bulk-listings-template.csv",
     "web/dist/index.html",

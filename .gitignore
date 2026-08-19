@@ -43,3 +43,8 @@ web/.vite/
 
 # The delivery ZIP is a build artefact, rebuilt by tools/build_delivery.py.
 /haat-lister-delivery.zip
+
+# Generated from START-HERE.md by tools/build_docs.py. The markdown is the
+# source of truth; these are rebuilt, never edited.
+/START-HERE.pdf
+/START-HERE.docx
